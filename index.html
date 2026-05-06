@@ -3,7 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <!-- 版號 v13.10.7
+  <!-- 版號 v13.10.8
+    v13.10.7 基礎上修正：
+    1. 每批出題完成立即寫入 Bank（不等全部完成），避免任一批超時導致全部丟失
+    2. 單批超時跳過繼續（不中斷整個流程），並在完成後顯示失敗批次數
+    3. 進度條批次計算修正：從 /10 改為 /5（對應 BATCH_SIZE=5）
+    --- 繼承 v13.10.7 修正 ---
+<!-- 版號 v13.10.7
     v13.10.6 基礎上修正：
     1. BATCH_SIZE 5→經 Console 測試：5節點15題可在85秒內完成
     --- 繼承 v13.10.6 修正 ---
@@ -19,7 +25,7 @@
     6. 出題完成後強制 loadBankStatus() 刷新
     7. generateQuiz 前端再次過濾：確保科目完全匹配
   -->
-  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.7)</title>
+  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.8)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
@@ -605,7 +611,7 @@
 </main>
 <footer class="mt-4">
   <div class="container px-3">
-    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.7 ｜
+    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.8 ｜
     <a href="https://github.com/st887105/20260404" target="_blank"><i class="fa-brands fa-github me-1"></i>原始碼</a>
   </div>
 </footer>
@@ -878,37 +884,55 @@ const API = {
   getPracticeSettings:()=>API._callJsonpOnly('getPracticeSettings',{}),
   savePracticeSettings:(nodeCount,qCount,pwd)=>API._callJsonpOnly('savePracticeSettings',{nodeCount,qCount,pwd}),
   saveBatchFromWorker:(taskName,questions)=>API._call('saveBatchFromWorker',{taskName,questions}),
-  // ⭐ v13.10.6 修正2+3：分批出題（每批最多10節點）+ 跳過已有題目的節點
+  // ⭐ v13.10.8：每批立即寫入Bank（超時跳過繼續）+ 跳過已有節點
   generateAllBatchClaude: async (nodes, grade, subject, taskName) => {
-    const BATCH_SIZE = 5; // ⭐ v13.10.7 經 Console 測試：5節點=15題可在 85 秒內完成，10節點超時
-    // 若有 taskName，先查 Bank 已有哪些節點，避免重複生成
+    const BATCH_SIZE = 5; // 經測試：5節點≈25秒，安全值
+    // 先查 Bank 已有哪些節點，避免重複生成
     let existingNodes = new Set();
     if (taskName) {
       try {
         const existing = await API._call('getTaskQuestions', { taskName });
         (existing.questions || []).forEach(q => { if (q.node) existingNodes.add(q.node); });
         console.log('[Claude] Bank 已有節點：', [...existingNodes]);
-      } catch(e) { console.warn('[Claude] 查詢已有節點失敗（不影響出題）：', e.message); }
+      } catch(e) { console.warn('[Claude] 查詢已有節點失敗：', e.message); }
     }
-    // 過濾掉已有題目的節點
     const needNodes = nodes.filter(n => !existingNodes.has(n));
     if (!needNodes.length) {
-      console.log('[Claude] 所有節點已有題目，略過出題');
-      return { questions: [], skipped: nodes.length };
+      console.log('[Claude] 所有節點已有題目，略過');
+      return { questions: [], skipped: nodes.length, saved: 0 };
     }
     if (existingNodes.size > 0) {
-      console.log(`[Claude] 跳過已有節點 ${existingNodes.size} 個，僅出題 ${needNodes.length} 個節點`);
+      console.log(`[Claude] 跳過已有節點 ${existingNodes.size} 個，剩餘 ${needNodes.length} 個`);
     }
-    // 分批出題，每批 BATCH_SIZE 個節點
-    const allQuestions = [];
+    const totalBatches = Math.ceil(needNodes.length / BATCH_SIZE);
+    let allSaved = 0, allQuestions = [], failedBatches = [];
     for (let i = 0; i < needNodes.length; i += BATCH_SIZE) {
       const batchNodes = needNodes.slice(i, i + BATCH_SIZE);
-      console.log(`[Claude] 批次 ${Math.floor(i/BATCH_SIZE)+1}/${Math.ceil(needNodes.length/BATCH_SIZE)}：`, batchNodes);
-      const result = await API._callClaude('questions', { nodes: batchNodes, grade, subject, qcount: 3 });
-      const batchQs = (result && (result.questions || (result.data && result.data.questions))) || [];
-      allQuestions.push(...batchQs);
+      const batchNum = Math.floor(i/BATCH_SIZE) + 1;
+      console.log(`[Claude] 批次 ${batchNum}/${totalBatches}：`, batchNodes);
+      try {
+        const result = await API._callClaude('questions', { nodes: batchNodes, grade, subject, qcount: 3 });
+        const batchQs = (result && (result.questions || (result.data && result.data.questions))) || [];
+        if (batchQs.length && taskName) {
+          // ⭐ 每批立即寫入 Bank，不等全部完成
+          try {
+            const enriched = batchQs.map(q => Object.assign({ grade, subject }, q));
+            await API.saveBatchFromWorker(taskName, enriched);
+            allSaved += enriched.length;
+            console.log(`[Claude] 批次 ${batchNum} 已存 Bank：${enriched.length} 題（累計 ${allSaved} 題）`);
+          } catch(saveErr) {
+            console.warn(`[Claude] 批次 ${batchNum} 存 Bank 失敗：`, saveErr.message);
+          }
+        }
+        allQuestions.push(...batchQs);
+      } catch(batchErr) {
+        // 單批超時不中斷，記錄後繼續下一批
+        console.warn(`[Claude] 批次 ${batchNum} 失敗（跳過繼續）：`, batchErr.message);
+        failedBatches.push(batchNum);
+      }
     }
-    return { questions: allQuestions };
+    console.log(`[Claude] 完成：共存入 ${allSaved} 題，失敗批次：`, failedBatches);
+    return { questions: allQuestions, saved: allSaved, failed: failedBatches };
   },
 };
 
@@ -1039,39 +1063,34 @@ async function wizardCreateAndGenerate() {
     if (pMsg) pMsg.textContent = '✅ 名冊已儲存，開始 AI 出題…';
     const effectiveNodes = uniqueNodes.length > 0 ? uniqueNodes : ['通用基礎練習'];
     if (app.wizEngine === 'claude') {
-      const totalBatchesWiz = Math.ceil(effectiveNodes.length / 10);
-      if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatchesWiz} 批）…`;
+      const CLAUDE_BATCH_SIZE_WIZ = 5;
+      const totalBatchesWiz = Math.ceil(effectiveNodes.length / CLAUDE_BATCH_SIZE_WIZ);
+      if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題（共 ${effectiveNodes.length} 節點，分 ${totalBatchesWiz} 批，每批立即存 Bank）…`;
       if (pBar) pBar.style.width = '20%';
-      // ⭐ v13.10.6：分批進度更新
+      // ⭐ v13.10.8：攔截 _callClaude 更新進度
       let batchDoneWiz = 0;
       const origCallClaudeWiz = API._callClaude.bind(API);
       API._callClaude = async (mode, data) => {
         const r = await origCallClaudeWiz(mode, data);
         if (mode === 'questions') {
           batchDoneWiz++;
-          const pct = Math.min(85, 20 + Math.round((batchDoneWiz / Math.max(totalBatchesWiz, 1)) * 65));
+          const pct = Math.min(88, 20 + Math.round((batchDoneWiz / Math.max(totalBatchesWiz, 1)) * 68));
           if (pBar) pBar.style.width = pct + '%';
-          if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題：第 <b>${batchDoneWiz}</b>/${totalBatchesWiz} 批完成…`;
+          if (pMsg) pMsg.innerHTML = `🔮 第 <b>${batchDoneWiz}</b>/${totalBatchesWiz} 批完成，已存入 Bank…`;
         }
         return r;
       };
+      // ⭐ v13.10.8：每批立即寫入 Bank，超時批次跳過繼續
       const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
         API._callClaude = origCallClaudeWiz;
       });
-      if (pBar) pBar.style.width = '90%';
-      // ⭐ v13.10.5+v13.10.6：防禦 data 包裝格式，補全 grade/subject，跳過已有節點
-      const claudeQs = (result && (result.questions || (result.data && result.data.questions))) || [];
-      if (result && result.skipped) {
-        if (pMsg) pMsg.innerHTML = `✅ 所有節點已有題目（共跳過 ${result.skipped} 個節點），無需重複生成`;
-      } else if (claudeQs.length) {
-        if (pMsg) pMsg.textContent = `💾 題目回存題庫中（${claudeQs.length} 題）…`;
-        try {
-          const enriched = claudeQs.map(q => Object.assign({ grade, subject }, q));
-          await API.saveBatchFromWorker(taskName, enriched);
-          console.log('[Claude 精靈] 題目已回存 Bank，共', enriched.length, '題');
-        } catch(saveErr) {
-          console.warn('[Claude 精靈] 回存 Bank 失敗：', saveErr.message);
-        }
+      if (pBar) pBar.style.width = '95%';
+      const savedCountWiz = result?.saved || 0;
+      const failedCountWiz = (result?.failed || []).length;
+      if (result?.skipped) {
+        if (pMsg) pMsg.innerHTML = `✅ 所有節點已有題目（跳過 ${result.skipped} 個），無需重複生成`;
+      } else if (savedCountWiz > 0) {
+        if (pMsg) pMsg.innerHTML = `✅ 已存入 Bank：<b>${savedCountWiz}</b> 題${failedCountWiz > 0 ? `（${failedCountWiz} 批超時跳過，可重新出題補齊）` : ''}`;
       } else {
         console.warn('[Claude 精靈] claudeQs 為空，Worker 回傳：', JSON.stringify(result).slice(0, 300));
       }
@@ -1326,44 +1345,38 @@ async function uploadAndGenerate() {
     pBar.style.width = '8%'; pMsg.textContent = '✅ 學生名冊已儲存，開始 AI 出題…';
     const effectiveNodes = app.excelNodes.length > 0 ? app.excelNodes : ['通用基礎練習'];
     if (app.upEngine === 'claude') {
-      const totalBatches = Math.ceil(effectiveNodes.length / 10);
-      pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatches} 批）…`;
+      const CLAUDE_BATCH_SIZE = 5;
+      const totalBatches = Math.ceil(effectiveNodes.length / CLAUDE_BATCH_SIZE);
+      pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatches} 批，每批完成立即存入 Bank）…`;
       pBar.style.width = '20%';
-      // ⭐ v13.10.6：分批進度回呼（讓進度條動起來）
+      // ⭐ v13.10.8：攔截 _callClaude 更新進度（每批完成立即更新）
       const origCallClaude = API._callClaude.bind(API);
       let batchDone = 0;
-      const batchTotal = totalBatches;
-      const onBatchProgress = () => {
-        batchDone++;
-        const pct = Math.min(85, 20 + Math.round((batchDone / Math.max(batchTotal, 1)) * 65));
-        pBar.style.width = pct + '%';
-        pMsg.innerHTML = `🔮 Claude Worker 出題：第 <b>${batchDone}</b>/${batchTotal} 批完成…`;
-      };
-      // 暫時攔截 _callClaude 以更新進度
       API._callClaude = async (mode, data) => {
         const r = await origCallClaude(mode, data);
-        if (mode === 'questions') onBatchProgress();
+        if (mode === 'questions') {
+          batchDone++;
+          const pct = Math.min(88, 20 + Math.round((batchDone / Math.max(totalBatches, 1)) * 68));
+          pBar.style.width = pct + '%';
+          pMsg.innerHTML = `🔮 第 <b>${batchDone}</b>/${totalBatches} 批完成，已存入 Bank…`;
+        }
         return r;
       };
+      // ⭐ v13.10.8：每批立即寫入 Bank，超時批次跳過繼續
       const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
-        API._callClaude = origCallClaude; // 還原
+        API._callClaude = origCallClaude;
       });
-      pBar.style.width = '90%';
-      // ⭐ v13.10.5+v13.10.6：防禦 data 包裝格式，補全 grade/subject
-      const claudeQs = (result && (result.questions || (result.data && result.data.questions))) || [];
-      if (result && result.skipped) {
-        pMsg.innerHTML = `✅ 所有節點已有題目（共跳過 ${result.skipped} 個節點），無需重複生成`;
-      } else if (claudeQs.length) {
-        pMsg.textContent = `💾 題目回存題庫中（${claudeQs.length} 題）…`;
-        try {
-          const enriched = claudeQs.map(q => Object.assign({ grade, subject }, q));
-          await API.saveBatchFromWorker(taskName, enriched);
-          console.log('[Claude 上傳] 題目已回存 Bank，共', enriched.length, '題');
-        } catch(saveErr) {
-          console.warn('[Claude 上傳] 回存 Bank 失敗：', saveErr.message);
-        }
+      pBar.style.width = '95%';
+      // 顯示結果摘要
+      const savedCount = result?.saved || 0;
+      const failedCount = (result?.failed || []).length;
+      if (result?.skipped) {
+        pMsg.innerHTML = `✅ 所有節點已有題目（跳過 ${result.skipped} 個節點），無需重複生成`;
+      } else if (savedCount > 0) {
+        pMsg.innerHTML = `✅ 已存入 Bank：<b>${savedCount}</b> 題${failedCount > 0 ? `（${failedCount} 批超時跳過，可重新出題補齊）` : ''}`;
       } else {
-        console.warn('[Claude 上傳] claudeQs 為空，Worker 回傳：', JSON.stringify(result).slice(0, 300));
+        pMsg.innerHTML = `⚠️ 所有批次均失敗，請切換 GAS 模式或稍後再試`;
+        console.warn('[Claude 上傳] 全部批次失敗，result：', result);
       }
     } else {
       let gs = { isPaid: false }; try { gs = await API.getGeminiSettings(); } catch(e) {}
