@@ -1158,10 +1158,17 @@ async function loadTasksForLogin() {
   if (msg) msg.textContent = '';
   if (tip) tip.style.display = 'none';
   try {
-    // ⭐ v13.10.9：改用 API._call（Worker fetch 優先），避免擴充功能攔截 JSONP
+    // ⭐ v13.10.9fix2：直接 fetch POST GAS，跳過 Worker 和 JSONP
+    const _dp = async (action, data={}) => {
+      const r = await fetch(app.gasUrl, {method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,data}),redirect:'follow'});
+      if(!r.ok) throw new Error('GAS HTTP '+r.status);
+      const j = await r.json();
+      if(j.status!=='success') throw new Error(j.message||'後端錯誤');
+      return j.data;
+    };
     const [tasks, helpUrl] = await Promise.all([
-      API._call('getTasks'),
-      API._call('getHelpUrl').catch(() => '')
+      _dp('getTasks'),
+      _dp('getHelpUrl').catch(() => '')
     ]);
     app.taskList = tasks;
     if (!tasks.length) {
@@ -1204,8 +1211,15 @@ async function onTaskChange() {
   numSel.innerHTML = '<option value="">-- 載入中… --</option>';
   if (!taskName) { numSel.innerHTML = '<option value="">-- 請先選任務 --</option>'; return; }
   try {
-    // ⭐ v13.10.9：改用 API._call，避免擴充功能攔截 JSONP
-    app.studentList = await API._call('getStudents', { taskName });
+    // ⭐ v13.10.9fix2：直接 fetch POST GAS
+    const _dp2 = async (action, data={}) => {
+      const r = await fetch(app.gasUrl, {method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action,data}),redirect:'follow'});
+      if(!r.ok) throw new Error('GAS HTTP '+r.status);
+      const j = await r.json();
+      if(j.status!=='success') throw new Error(j.message||'後端錯誤');
+      return j.data;
+    };
+    app.studentList = await _dp2('getStudents', { taskName });
     if (!app.studentList.length) { numSel.innerHTML = '<option value="">-- 此任務無學生資料 --</option>'; return; }
     numSel.innerHTML = '<option value="">-- 請選擇姓名 --</option>' +
       app.studentList.map(s => `<option value="${esc(s.number)}">${esc(formatStudentLabel(s))}</option>`).join('');
