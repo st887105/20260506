@@ -1,31 +1,23 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <!-- 版號 v13.10.8
-    v13.10.7 基礎上修正：
-    1. 每批出題完成立即寫入 Bank（不等全部完成），避免任一批超時導致全部丟失
-    2. 單批超時跳過繼續（不中斷整個流程），並在完成後顯示失敗批次數
-    3. 進度條批次計算修正：從 /10 改為 /5（對應 BATCH_SIZE=5）
-    --- 繼承 v13.10.7 修正 ---
-<!-- 版號 v13.10.7
-    v13.10.6 基礎上修正：
-    1. BATCH_SIZE 5→經 Console 測試：5節點15題可在85秒內完成
-    --- 繼承 v13.10.6 修正 ---
-<!-- 版號 v13.10.6
-    v13.10.5 基礎上修正：
-    1. 錯誤提示智慧化：Claude Worker 408 超時不再顯示「確認 Gemini API 金鑰」，改為顯示 Worker 超時排查建議
-    2. Claude Worker 分批出題：每批最多 10 個節點，避免節點多時 408 超時
-    3. 避免重複生成：出題前先查 Bank 已有哪些節點，跳過已有題目的節點
-    4. 分批進度條：使用者可看到「第 N/M 批完成」的即時進度
-    --- 繼承 v13.10.5 修正 ---
-    4. 出題方式文字：移除「GAS 模式下有效」限制提示
-    5. 每批次出題完成立即回存 Bank
-    6. 出題完成後強制 loadBankStatus() 刷新
-    7. generateQuiz 前端再次過濾：確保科目完全匹配
+  <!--
+    版號 v13.10.9
+    v13.10.8 基礎上修正：
+    1. loadTasksForLogin / onTaskChange：改用 API._call（Worker fetch），
+       避免擴充功能攔截 JSONP script tag 導致首頁任務清單無法顯示
+    2. 連線失敗提示加入「建議使用無痕模式」說明
+    3. 題庫管理卡片：改用 data-task attribute 傳任務名稱，
+       修正中文任務名稱含特殊字元時 onclick 字串逸脫失效的問題
+    4. 差異化學習單：GAS 引擎 Gemini 模型參數顯示優化（UI 說明調整）
+    ─── 繼承 v13.10.8 ───
+    1. 每批出題完成立即寫入 Bank
+    2. 單批超時跳過繼續
+    3. 進度條批次計算修正
   -->
-  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.8)</title>
+  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.9)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
@@ -131,6 +123,9 @@
     .gen-mode-label:hover{border-color:var(--primary);background:#f0f8ff;}
     .gen-mode-label input[type=radio]{accent-color:var(--primary);}
     .gen-mode-label.active-mode{border-color:var(--primary);background:#e3f2fd;font-weight:600;color:var(--primary-dark);}
+    /* ⭐ v13.10.9：無痕模式提示樣式 */
+    .incognito-tip{background:#fff8e1;border:1px solid #ffd54f;border-radius:8px;padding:8px 12px;font-size:.8rem;color:#5d4037;margin-top:6px;display:none;}
+    .incognito-tip i{color:#f9a825;}
   </style>
 </head>
 <body>
@@ -157,6 +152,7 @@
   </div>
 </div>
 <main class="container-fluid px-2 px-md-4">
+  <!-- ===== 登入頁 ===== -->
   <div id="view-login" class="fade-in">
     <div class="login-grid mx-auto" style="max-width:960px;">
       <div class="card p-4">
@@ -177,6 +173,12 @@
           <i class="fa-solid fa-play me-2"></i>開始挑戰
         </button>
         <p class="text-muted small mt-2 mb-0" id="login-status-msg"></p>
+        <!-- ⭐ v13.10.9：無痕模式提示（連線失敗時顯示） -->
+        <div class="incognito-tip" id="incognito-tip">
+          <i class="fa-solid fa-shield-halved me-1"></i>
+          <b>連線失敗？</b>瀏覽器擴充功能可能干擾連線，請改用
+          <b>無痕模式</b>開啟本頁面（Chrome：右上角 → 開新無痕式視窗）。
+        </div>
       </div>
       <div class="card p-4">
         <h5 class="fw-bold mb-3"><i class="fa-solid fa-chalkboard-teacher text-success me-2"></i>教師管理後台</h5>
@@ -212,6 +214,8 @@
       </a>
     </div>
   </div>
+
+  <!-- ===== 管理後台 ===== -->
   <div id="view-admin" style="display:none;" class="fade-in">
     <div class="row justify-content-center">
       <div class="col-12 col-xl-11">
@@ -229,7 +233,7 @@
             <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-settings" onclick="loadSettingsTab()">⚙️ 設定</button></li>
           </ul>
           <div class="tab-content">
-            <!-- ===== 快速精靈 Tab ===== -->
+            <!-- 快速精靈 Tab -->
             <div class="tab-pane fade show active" id="tab-wizard">
               <div class="alert alert-success py-2 px-3 small mb-3"><b>🚀 快速設定精靈</b>：不需要 Excel，直接輸入學生資料與弱點節點，一鍵建立任務並出題。</div>
               <div class="card border-0 p-3 mb-3" style="background:linear-gradient(135deg,#e8f4fd,#f3f0ff);">
@@ -291,7 +295,8 @@
                 </div>
               </div>
             </div>
-            <!-- ===== Excel 上傳 Tab ===== -->
+
+            <!-- Excel 上傳 Tab -->
             <div class="tab-pane fade" id="tab-upload">
               <div class="row g-3">
                 <div class="col-12 col-md-4"><label class="form-label fw-bold small">任務名稱</label><input id="task-name" type="text" class="form-control" placeholder="例：五年甲班114上學力檢測"></div>
@@ -371,24 +376,28 @@
                 </div>
               </div>
             </div>
-            <!-- ===== 題庫管理 Tab ===== -->
+
+            <!-- 題庫管理 Tab -->
             <div class="tab-pane fade" id="tab-bank"><div id="bank-status"><div class="text-muted small">點擊「題庫管理」標籤載入…</div></div></div>
-            <!-- ===== 成績 Tab ===== -->
+
+            <!-- 成績 Tab -->
             <div class="tab-pane fade" id="tab-results">
               <div class="row g-2 mb-3"><div class="col-12 col-md-6"><label class="form-label fw-bold small">選擇任務</label><select id="results-task" class="form-select" onchange="loadResults()"><option value="">-- 請選擇 --</option></select></div></div>
               <div id="results-area"></div>
             </div>
-            <!-- ===== 差異化 Tab ===== -->
+
+            <!-- 差異化 Tab -->
             <div class="tab-pane fade" id="tab-analysis">
               <div class="row g-2 mb-3"><div class="col-12 col-md-6"><label class="form-label fw-bold small">選擇任務</label><select id="analysis-task" class="form-select" onchange="loadAnalysis()"><option value="">-- 請選擇 --</option></select></div></div>
               <div id="analysis-area"></div>
               <div class="mt-3" id="worksheet-area" style="display:none;">
                 <div class="ws-mgmt-card">
                   <h6><i class="fa-solid fa-file-lines me-1"></i>AI 差異化補教講義</h6>
+                  <!-- ⭐ v13.10.9：GAS 學習單說明更新，說明 Prompt 已改寫、maxTokens 已降低 -->
                   <div class="ws-tip">
                     <i class="fa-solid fa-circle-info me-1"></i>
-                    <b>GAS 免費版限制</b>：生成學習單需 AI 大量輸出，容易超過 30 秒限制而失敗（Failed to fetch）。
-                    建議改用 <b>Claude Worker（付費）</b>，或至 ⚙️設定頁<b>縮短學習單 Prompt</b>（移除多餘要求、每類題改為 1 題）。
+                    <b>GAS 免費版</b>：學習單 Prompt 已在 v13.10.11 後端優化（輸出量降低），成功率提升。
+                    若仍超時，建議改用 <b>Claude Worker（付費）</b>，或至 ⚙️設定頁自訂更短的學習單 Prompt。
                   </div>
                   <div class="card border-0 p-2 mb-3" style="background:linear-gradient(135deg,#fff8e1,#f3f0ff);border-radius:10px;">
                     <div class="small fw-bold text-muted mb-2"><i class="fa-solid fa-robot me-1"></i>學習單生成引擎</div>
@@ -425,7 +434,7 @@
                       <span class="text-muted ms-2 small">（可分享給學生，或直接下載列印）</span>
                     </div>
                     <div id="ws-drive-link-warn" class="alert alert-warning py-1 px-2 small mt-2" style="display:none;">
-                      <i class="fa-solid fa-triangle-exclamation me-1"></i>此學習單尚未儲存至 Google Drive（PDF 格式），請重新生成後自動儲存。
+                      <i class="fa-solid fa-triangle-exclamation me-1"></i>此學習單尚未儲存至 Google Drive，請重新生成後自動儲存。
                     </div>
                     <div id="ws-preview-area" style="display:none;">
                       <iframe id="ws-preview-frame" title="差異化學習單預覽" scrolling="yes"></iframe>
@@ -434,7 +443,8 @@
                 </div>
               </div>
             </div>
-            <!-- ===== 設定 Tab ===== -->
+
+            <!-- 設定 Tab -->
             <div class="tab-pane fade" id="tab-settings">
               <div class="row g-4">
                 <div class="col-12 col-lg-5">
@@ -533,6 +543,8 @@
       </div>
     </div>
   </div>
+
+  <!-- ===== 測驗頁 ===== -->
   <div id="view-quiz" style="display:none;" class="fade-in">
     <div class="row justify-content-center">
       <div class="col-12 col-md-9 col-lg-7">
@@ -559,6 +571,8 @@
       </div>
     </div>
   </div>
+
+  <!-- ===== 結果頁 ===== -->
   <div id="view-result" style="display:none;" class="fade-in">
     <div class="row justify-content-center">
       <div class="col-12 col-md-8 col-lg-6">
@@ -574,6 +588,8 @@
       </div>
     </div>
   </div>
+
+  <!-- ===== 補救練習頁 ===== -->
   <div id="view-practice" style="display:none;" class="fade-in">
     <div class="row justify-content-center">
       <div class="col-12 col-md-9 col-lg-7">
@@ -593,6 +609,8 @@
       </div>
     </div>
   </div>
+
+  <!-- ===== 示範頁 ===== -->
   <div id="view-demo" style="display:none;" class="fade-in">
     <div class="row justify-content-center">
       <div class="col-12 col-md-10 col-lg-8">
@@ -609,17 +627,20 @@
     </div>
   </div>
 </main>
+
 <footer class="mt-4">
   <div class="container px-3">
-    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.8 ｜
+    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.9 ｜
     <a href="https://github.com/st887105/20260404" target="_blank"><i class="fa-brands fa-github me-1"></i>原始碼</a>
   </div>
 </footer>
+
 <script>
 'use strict';
 const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbx4ZzICWn8QGZfSMwteq_Sqy_RGMnJSmN_Sts3ERto4K-nZ1EOvTFLREowLd0SIvO-Z/exec';
 const WORKER_URL = 'https://gas-proxy.sunny-f0b.workers.dev';
 const DEFAULT_CLAUDE_WORKER_URL = 'https://20260501claude-worksheet.sunny-f0b.workers.dev';
+
 function _loadGasUrl() {
   try {
     const saved = localStorage.getItem('gasUrl');
@@ -632,6 +653,7 @@ function _loadGasUrl() {
 function _saveGasUrlToStorage(url) { try { localStorage.setItem('gasUrl', url); localStorage.setItem('gasUrlDefault', DEFAULT_GAS_URL); } catch(e) {} }
 function _loadClaudeWorkerUrl() { try { return localStorage.getItem('claudeWorkerUrl') || DEFAULT_CLAUDE_WORKER_URL; } catch(e) { return DEFAULT_CLAUDE_WORKER_URL; } }
 function _saveClaudeWorkerUrl(url) { try { localStorage.setItem('claudeWorkerUrl', url); } catch(e) {} }
+
 const app = {
   gasUrl: _loadGasUrl(), claudeWorkerUrl: _loadClaudeWorkerUrl(),
   adminPwd:'', taskList:[], studentList:[],
@@ -734,7 +756,6 @@ function saveClaudeWorkerUrl() {
 const API = {
   _call: async (action, data = {}) => {
     const payloadStr = JSON.stringify({ action, data });
-    // ⭐ v13.10.5 修正1：saveBatchFromWorker 強制走 POST，避免 questions 陣列過大被 JSONP GET 截斷
     const isLarge = payloadStr.length > 1500 || action === 'uploadTaskData' || action === 'saveWorksheetToCloud' || action === 'saveBatchFromWorker';
     if (!isLarge) {
       try {
@@ -864,7 +885,7 @@ const API = {
     const nodeList = (topNodes || []).slice(0, 3).map((n, i) => `${i + 1}. ${n}`).join('\n');
     const isChinese = subject === '國語';
     const prompt = isChinese
-      ? `請為「${grade}」學生設計一份 A4 補救學習單（完整 HTML 格式）。\n弱點節點：\n${nodeList}\n\n要求：\n1. 包含閱讀文本、字詞練習、閱讀理解題（Level C/B/A 各2題）、解答欄\n2. 使用 CSS 讓版面美觀，適合列印\n3. 輸出完整 HTML（包含 <!DOCTYPE html>）`
+      ? `請為「${grade}」學生設計一份 A4 補救學習單（完整 HTML 格式）。\n弱點節點：\n${nodeList}\n\n要求：\n1. 包含閱讀文本、字詞練習、閱讀理解題（Level C/B/A 各2題）、解答欄\n2. 使用 CSS 讓版面美觀，適合列印\n3. 輸出完整 HTML（包含 <!DOCTYPE html>）\n4. 注音使用台灣注音符號（ㄅㄆㄇ），不可使用漢語拼音`
       : `請為「${grade}」學生設計一份 A4 補救學習單（完整 HTML 格式）。\n弱點節點：\n${nodeList}\n\n要求：\n1. 包含概念說明、例題、練習題（Level C/B/A 各2題）、解答欄\n2. 使用 CSS 讓版面美觀，適合列印\n3. 輸出完整 HTML（包含 <!DOCTYPE html>）`;
     const systemPrompt = isChinese ? '你是台灣國小國語文教師，擅長閱讀理解差異化補救教學。' : '你是台灣國小數學科教師，擅長差異化補救教學。';
     const result = await API._callClaude('worksheet', { prompt, systemPrompt, maxTokens: 4096 });
@@ -884,10 +905,8 @@ const API = {
   getPracticeSettings:()=>API._callJsonpOnly('getPracticeSettings',{}),
   savePracticeSettings:(nodeCount,qCount,pwd)=>API._callJsonpOnly('savePracticeSettings',{nodeCount,qCount,pwd}),
   saveBatchFromWorker:(taskName,questions)=>API._call('saveBatchFromWorker',{taskName,questions}),
-  // ⭐ v13.10.8：每批立即寫入Bank（超時跳過繼續）+ 跳過已有節點
   generateAllBatchClaude: async (nodes, grade, subject, taskName) => {
-    const BATCH_SIZE = 5; // 經測試：5節點≈25秒，安全值
-    // 先查 Bank 已有哪些節點，避免重複生成
+    const BATCH_SIZE = 5;
     let existingNodes = new Set();
     if (taskName) {
       try {
@@ -901,9 +920,6 @@ const API = {
       console.log('[Claude] 所有節點已有題目，略過');
       return { questions: [], skipped: nodes.length, saved: 0 };
     }
-    if (existingNodes.size > 0) {
-      console.log(`[Claude] 跳過已有節點 ${existingNodes.size} 個，剩餘 ${needNodes.length} 個`);
-    }
     const totalBatches = Math.ceil(needNodes.length / BATCH_SIZE);
     let allSaved = 0, allQuestions = [], failedBatches = [];
     for (let i = 0; i < needNodes.length; i += BATCH_SIZE) {
@@ -914,19 +930,15 @@ const API = {
         const result = await API._callClaude('questions', { nodes: batchNodes, grade, subject, qcount: 3 });
         const batchQs = (result && (result.questions || (result.data && result.data.questions))) || [];
         if (batchQs.length && taskName) {
-          // ⭐ 每批立即寫入 Bank，不等全部完成
           try {
             const enriched = batchQs.map(q => Object.assign({ grade, subject }, q));
             await API.saveBatchFromWorker(taskName, enriched);
             allSaved += enriched.length;
             console.log(`[Claude] 批次 ${batchNum} 已存 Bank：${enriched.length} 題（累計 ${allSaved} 題）`);
-          } catch(saveErr) {
-            console.warn(`[Claude] 批次 ${batchNum} 存 Bank 失敗：`, saveErr.message);
-          }
+          } catch(saveErr) { console.warn(`[Claude] 批次 ${batchNum} 存 Bank 失敗：`, saveErr.message); }
         }
         allQuestions.push(...batchQs);
       } catch(batchErr) {
-        // 單批超時不中斷，記錄後繼續下一批
         console.warn(`[Claude] 批次 ${batchNum} 失敗（跳過繼續）：`, batchErr.message);
         failedBatches.push(batchNum);
       }
@@ -1067,7 +1079,6 @@ async function wizardCreateAndGenerate() {
       const totalBatchesWiz = Math.ceil(effectiveNodes.length / CLAUDE_BATCH_SIZE_WIZ);
       if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題（共 ${effectiveNodes.length} 節點，分 ${totalBatchesWiz} 批，每批立即存 Bank）…`;
       if (pBar) pBar.style.width = '20%';
-      // ⭐ v13.10.8：攔截 _callClaude 更新進度
       let batchDoneWiz = 0;
       const origCallClaudeWiz = API._callClaude.bind(API);
       API._callClaude = async (mode, data) => {
@@ -1080,7 +1091,6 @@ async function wizardCreateAndGenerate() {
         }
         return r;
       };
-      // ⭐ v13.10.8：每批立即寫入 Bank，超時批次跳過繼續
       const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
         API._callClaude = origCallClaudeWiz;
       });
@@ -1091,8 +1101,6 @@ async function wizardCreateAndGenerate() {
         if (pMsg) pMsg.innerHTML = `✅ 所有節點已有題目（跳過 ${result.skipped} 個），無需重複生成`;
       } else if (savedCountWiz > 0) {
         if (pMsg) pMsg.innerHTML = `✅ 已存入 Bank：<b>${savedCountWiz}</b> 題${failedCountWiz > 0 ? `（${failedCountWiz} 批超時跳過，可重新出題補齊）` : ''}`;
-      } else {
-        console.warn('[Claude 精靈] claudeQs 為空，Worker 回傳：', JSON.stringify(result).slice(0, 300));
       }
       if (pBar) pBar.style.width = '100%';
       if (pMsg) pMsg.innerHTML = `🎉 Claude Worker 完成！耗時 <b>${elapsedStr()}</b>`;
@@ -1114,14 +1122,13 @@ async function wizardCreateAndGenerate() {
     if (pBar) pBar.style.width = '100%';
     if (pMsg) pMsg.innerHTML = `🎉 完成！耗時 <b>${elapsed}</b>`;
     if (pEl) pEl.textContent = '';
-    app.taskList = await API._callJsonpOnly('getTasks', {});
+    app.taskList = await API._call('getTasks');
     populateAdminTaskDropdowns(); loadTasksForLogin();
     setTimeout(() => loadBankStatus(), 1500);
     Swal.fire({ icon: 'success', title: '🎉 任務建立完成！', html: `「${esc(taskName)}」已完成出題。<br><span class="badge bg-secondary">耗時：${elapsed}</span>`, confirmButtonText: '好的' });
   } catch(e) {
     stopProgress();
     if (pMsg) pMsg.innerHTML = `<span class="text-danger">❌ 失敗：${esc(e.message)}</span>`;
-    // ⭐ v13.10.6 修正1（精靈）：根據引擎顯示正確提示
     const isClaudeWiz = (app.wizEngine === 'claude');
     const isWizTimeout = e.message.includes('408') || e.message.includes('思考時間') || e.message.includes('timeout');
     let wizTroubleshoot = isClaudeWiz
@@ -1136,14 +1143,31 @@ async function wizardCreateAndGenerate() {
 // ==========================================
 async function loadTasksForLogin() {
   const sel = document.getElementById('login-task'), msg = document.getElementById('login-status-msg');
-  sel.innerHTML = '<option value="">-- 連線中… --</option>'; if (msg) msg.textContent = '';
+  const tip = document.getElementById('incognito-tip');
+  sel.innerHTML = '<option value="">-- 連線中… --</option>';
+  if (msg) msg.textContent = '';
+  if (tip) tip.style.display = 'none';
   try {
-    const [tasks, helpUrl] = await Promise.all([API._callJsonpOnly('getTasks', {}), API._callJsonpOnly('getHelpUrl', {}).catch(() => '')]);
+    // ⭐ v13.10.9：改用 API._call（Worker fetch 優先），避免擴充功能攔截 JSONP
+    const [tasks, helpUrl] = await Promise.all([
+      API._call('getTasks'),
+      API._call('getHelpUrl').catch(() => '')
+    ]);
     app.taskList = tasks;
-    if (!tasks.length) { sel.innerHTML = '<option value="">-- 目前沒有測驗任務 --</option>'; if (msg) msg.textContent = '請聯絡老師建立測驗任務後再登入。'; }
-    else { sel.innerHTML = '<option value="">-- 請選擇測驗任務 --</option>' + tasks.map(t => `<option value="${esc(t.taskName)}">${esc(t.taskName)}（${t.grade}/${t.subject}）</option>`).join(''); }
+    if (!tasks.length) {
+      sel.innerHTML = '<option value="">-- 目前沒有測驗任務 --</option>';
+      if (msg) msg.textContent = '請聯絡老師建立測驗任務後再登入。';
+    } else {
+      sel.innerHTML = '<option value="">-- 請選擇測驗任務 --</option>' +
+        tasks.map(t => `<option value="${esc(t.taskName)}">${esc(t.taskName)}（${t.grade}/${t.subject}）</option>`).join('');
+    }
     _applyHelpUrl(helpUrl);
-  } catch(e) { sel.innerHTML = '<option value="">-- 連線失敗 --</option>'; if (msg) msg.innerHTML = `<span class="text-danger">⚠️ <b>${esc(e.message)}</b></span>`; }
+  } catch(e) {
+    sel.innerHTML = '<option value="">-- 連線失敗 --</option>';
+    if (msg) msg.innerHTML = `<span class="text-danger">⚠️ <b>${esc(e.message)}</b></span>`;
+    // ⭐ v13.10.9：連線失敗時顯示無痕模式提示
+    if (tip) tip.style.display = '';
+  }
 }
 function _applyHelpUrl(url) {
   const area = document.getElementById('help-btn-area'), link = document.getElementById('help-btn-link');
@@ -1170,9 +1194,11 @@ async function onTaskChange() {
   numSel.innerHTML = '<option value="">-- 載入中… --</option>';
   if (!taskName) { numSel.innerHTML = '<option value="">-- 請先選任務 --</option>'; return; }
   try {
-    app.studentList = await API._callJsonpOnly('getStudents', { taskName });
+    // ⭐ v13.10.9：改用 API._call，避免擴充功能攔截 JSONP
+    app.studentList = await API._call('getStudents', { taskName });
     if (!app.studentList.length) { numSel.innerHTML = '<option value="">-- 此任務無學生資料 --</option>'; return; }
-    numSel.innerHTML = '<option value="">-- 請選擇姓名 --</option>' + app.studentList.map(s => `<option value="${esc(s.number)}">${esc(formatStudentLabel(s))}</option>`).join('');
+    numSel.innerHTML = '<option value="">-- 請選擇姓名 --</option>' +
+      app.studentList.map(s => `<option value="${esc(s.number)}">${esc(formatStudentLabel(s))}</option>`).join('');
   } catch(e) { numSel.innerHTML = `<option value="">-- 載入失敗：${e.message} --</option>`; }
 }
 async function studentLogin() {
@@ -1187,12 +1213,10 @@ async function studentLogin() {
     let questions = await API.generateQuiz(weakNode, taskName);
     Swal.close();
     if (!questions || questions.length === 0) return Swal.fire({ icon: 'warning', title: '題庫尚未建立', html: '老師尚未完成此任務的出題。' });
-    // 前端二次過濾（科目嚴格匹配）
     const taskSubject = app.currentTask?.subject || '';
     if (taskSubject) {
       const filtered = questions.filter(q => !q.subject || q.subject === taskSubject || q.subject === '');
       if (filtered.length > 0) questions = filtered;
-      else console.warn('[studentLogin] 科目過濾後為空，使用原始結果');
     }
     startQuiz(questions);
   } catch(e) { Swal.close(); Swal.fire({ icon: 'error', title: '載入題目失敗', text: e.message }); }
@@ -1349,7 +1373,6 @@ async function uploadAndGenerate() {
       const totalBatches = Math.ceil(effectiveNodes.length / CLAUDE_BATCH_SIZE);
       pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatches} 批，每批完成立即存入 Bank）…`;
       pBar.style.width = '20%';
-      // ⭐ v13.10.8：攔截 _callClaude 更新進度（每批完成立即更新）
       const origCallClaude = API._callClaude.bind(API);
       let batchDone = 0;
       API._callClaude = async (mode, data) => {
@@ -1362,12 +1385,10 @@ async function uploadAndGenerate() {
         }
         return r;
       };
-      // ⭐ v13.10.8：每批立即寫入 Bank，超時批次跳過繼續
       const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
         API._callClaude = origCallClaude;
       });
       pBar.style.width = '95%';
-      // 顯示結果摘要
       const savedCount = result?.saved || 0;
       const failedCount = (result?.failed || []).length;
       if (result?.skipped) {
@@ -1376,7 +1397,6 @@ async function uploadAndGenerate() {
         pMsg.innerHTML = `✅ 已存入 Bank：<b>${savedCount}</b> 題${failedCount > 0 ? `（${failedCount} 批超時跳過，可重新出題補齊）` : ''}`;
       } else {
         pMsg.innerHTML = `⚠️ 所有批次均失敗，請切換 GAS 模式或稍後再試`;
-        console.warn('[Claude 上傳] 全部批次失敗，result：', result);
       }
     } else {
       let gs = { isPaid: false }; try { gs = await API.getGeminiSettings(); } catch(e) {}
@@ -1395,23 +1415,20 @@ async function uploadAndGenerate() {
     stopProgress();
     const elapsed = elapsedStr();
     pBar.style.width = '100%'; pMsg.innerHTML = `🎉 完成！耗時 <b>${elapsed}</b>`; pEl.textContent = '';
-    app.taskList = await API._callJsonpOnly('getTasks', {});
+    app.taskList = await API._call('getTasks');
     populateAdminTaskDropdowns(); loadTasksForLogin();
     setTimeout(() => loadBankStatus(), 2000);
     Swal.fire({ icon: 'success', title: '🎉 出題完成！', html: `「${esc(taskName)}」已完成出題。<br><span class="badge bg-secondary">耗時：${elapsed}</span>`, confirmButtonText: '好的' });
   } catch(e) {
     stopProgress(); const elapsed = elapsedStr();
     pMsg.innerHTML = `<span class="text-danger">❌ 失敗（${elapsed}）：${esc(e.message)}</span>`; pEl.textContent = '';
-    // ⭐ v13.10.6 修正1：根據引擎顯示正確的排查提示
     const isClaudeEngine = (app.upEngine === 'claude');
     const isWorkerTimeout = e.message.includes('408') || e.message.includes('思考時間') || e.message.includes('timeout') || e.message.includes('Timeout');
     let troubleshootHtml = '';
     if (isClaudeEngine) {
-      if (isWorkerTimeout) {
-        troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>⚡ Claude Worker 超時（408）：</b><br>1. 節點數太多（目前 ${app.excelNodes.length} 個），建議一次不超過 15 個節點<br>2. 至 ⚙️設定頁確認 Claude Worker 網址正確<br>3. 稍後再試（Worker 可能暫時過載）</div>`;
-      } else {
-        troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>🔧 Claude Worker 排查：</b><br>1. 確認 Claude Worker 網址設定正確（⚙️設定頁）<br>2. 確認 Worker 服務正常運作<br>3. 可改用「GAS 模式」作為備援</div>`;
-      }
+      troubleshootHtml = isWorkerTimeout
+        ? `<div class="alert alert-warning small text-start mb-0"><b>⚡ Claude Worker 超時（408）：</b><br>1. 節點數太多（目前 ${app.excelNodes.length} 個），建議一次不超過 15 個節點<br>2. 至 ⚙️設定頁確認 Claude Worker 網址正確<br>3. 稍後再試（Worker 可能暫時過載）</div>`
+        : `<div class="alert alert-warning small text-start mb-0"><b>🔧 Claude Worker 排查：</b><br>1. 確認 Claude Worker 網址設定正確（⚙️設定頁）<br>2. 確認 Worker 服務正常運作<br>3. 可改用「GAS 模式」作為備援</div>`;
     } else {
       troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>🔧 GAS 模式排查：</b><br>1. 確認已在 GAS 後端設定 Gemini API 金鑰<br>2. 重新整理頁面再試一次</div>`;
     }
@@ -1436,19 +1453,19 @@ async function loadBankStatus() {
   if (!area) return;
   area.innerHTML = '<div class="text-muted small"><i class="fa-solid fa-spinner fa-spin me-1"></i>載入中…</div>';
   try {
-    const tasks = await API._callJsonpOnly('getTasks', {});
+    const tasks = await API._call('getTasks');
     if (!tasks.length) { area.innerHTML = '<p class="text-muted">目前沒有任務。</p>'; return; }
     const questionCounts = {};
     await Promise.allSettled(tasks.map(async task => {
-      try { const res = await API._callJsonpOnly('getTaskQuestions', { taskName: task.taskName }); questionCounts[task.taskName] = (res.questions || []).length; }
+      try { const res = await API._call('getTaskQuestions', { taskName: task.taskName }); questionCounts[task.taskName] = (res.questions || []).length; }
       catch(e) { questionCounts[task.taskName] = -1; }
     }));
     let html = '<div class="row g-3">';
     tasks.forEach(task => {
       const valid = _toArray(task.weakNodes).filter(isValidNode), qCount = questionCounts[task.taskName] ?? -1;
       const color = qCount > 0 ? 'success' : (valid.length > 0 ? 'warning' : 'secondary');
+      // ⭐ v13.10.9：改用 data-task attribute，修正中文任務名稱 onclick 逸脫問題
       const safeKey = task.taskName.replace(/[^a-zA-Z0-9]/g, '_');
-      const escapedName = task.taskName.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
       const qBadge = qCount < 0
         ? `<span class="badge bg-secondary">題目數：讀取失敗</span>`
         : qCount === 0
@@ -1458,7 +1475,9 @@ async function loadBankStatus() {
         <div class="card p-3 h-100 border-${color} border-2">
           <div class="d-flex justify-content-between align-items-start mb-1">
             <h6 class="fw-bold mb-0 me-2" style="font-size:.9rem;word-break:break-word;">${esc(task.taskName)}</h6>
-            <button class="btn btn-outline-danger btn-sm py-0 px-2 flex-shrink-0" onclick="deleteTask('${escapedName}')"><i class="fa-solid fa-trash-can"></i></button>
+            <button class="btn btn-outline-danger btn-sm py-0 px-2 flex-shrink-0"
+              data-task="${esc(task.taskName)}"
+              onclick="deleteTask(this.dataset.task)"><i class="fa-solid fa-trash-can"></i></button>
           </div>
           <p class="text-muted small mb-1">${esc(task.grade)} / ${esc(task.subject)} / ${task.studentCount} 位學生</p>
           <p class="text-muted small mb-1">建立：${esc(task.createdAt)}</p>
@@ -1470,9 +1489,15 @@ async function loadBankStatus() {
               <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="mixed"><label class="form-check-label">混合</label></div>
             </div></div>
           <div class="d-flex gap-2 flex-wrap mt-auto">
-            <button class="btn btn-sm btn-outline-primary" onclick="regenTask('${escapedName}')"><i class="fa-solid fa-rotate me-1"></i>重新出題</button>
-            <button class="btn btn-sm btn-outline-secondary" onclick="previewBankQuestions('${escapedName}')"><i class="fa-solid fa-eye me-1"></i>預覽題目</button>
-            <button class="btn btn-sm btn-outline-info" onclick="previewStudentList('${escapedName}')"><i class="fa-solid fa-users me-1"></i>學生名單</button>
+            <button class="btn btn-sm btn-outline-primary"
+              data-task="${esc(task.taskName)}"
+              onclick="regenTask(this.dataset.task)"><i class="fa-solid fa-rotate me-1"></i>重新出題</button>
+            <button class="btn btn-sm btn-outline-secondary"
+              data-task="${esc(task.taskName)}"
+              onclick="previewBankQuestions(this.dataset.task)"><i class="fa-solid fa-eye me-1"></i>預覽題目</button>
+            <button class="btn btn-sm btn-outline-info"
+              data-task="${esc(task.taskName)}"
+              onclick="previewStudentList(this.dataset.task)"><i class="fa-solid fa-users me-1"></i>學生名單</button>
           </div>
         </div></div>`;
     });
@@ -1501,7 +1526,7 @@ async function deleteTask(taskName) {
 async function previewStudentList(taskName) {
   Swal.fire({ title: '載入學生名單…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
   try {
-    const students = await API._callJsonpOnly('getStudents', { taskName }); Swal.close();
+    const students = await API._call('getStudents', { taskName }); Swal.close();
     if (!students || !students.length) return Swal.fire({ icon: 'info', title: '此任務無學生資料' });
     const tbody = students.map((s, i) => `<tr><td class="text-muted small">${i+1}</td><td>${esc(s.number)}</td><td class="fw-bold text-primary">${esc(formatStudentLabel(s))}</td><td class="small">${(s.weakNodes||[]).slice(0,3).map(n=>`<span class="weak-node-badge">${esc(n)}</span>`).join('')}</td></tr>`).join('');
     Swal.fire({ title: `「${taskName}」學生名單`, html: `<div class="text-start"><div class="alert alert-info py-1 px-2 small mb-2">共 <b>${students.length}</b> 位學生｜姓名已去識別化顯示</div><div style="max-height:420px;overflow-y:auto;"><table class="table table-sm table-bordered table-hover mb-0"><thead class="table-primary sticky-top"><tr><th>#</th><th>座號</th><th>匿名姓名</th><th>弱點節點</th></tr></thead><tbody>${tbody}</tbody></table></div></div>`, confirmButtonText: '關閉', width: '660px' });
@@ -1511,7 +1536,7 @@ async function previewStudentList(taskName) {
 async function previewBankQuestions(taskName) {
   Swal.fire({ title: '載入題目預覽…', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
   try {
-    const res = await API._callJsonpOnly('getTaskQuestions', { taskName }); Swal.close();
+    const res = await API._call('getTaskQuestions', { taskName }); Swal.close();
     const qs = res.questions || [];
     if (!qs.length) return Swal.fire({ icon: 'info', title: '題庫尚無題目', text: '請先點「重新出題」建立題庫。' });
     const byLevel = { A: 0, B: 0, C: 0, D: 0 };
@@ -1547,7 +1572,7 @@ async function regenTask(taskName) {
     }
     const elapsed = elapsedStr(); stopProgress(); clearInterval(timerTick);
     Swal.fire({ icon: 'success', title: '🎉 出題完成！', html: `所有題目已準備就緒。<br><span class="badge bg-secondary">耗時：${elapsed}</span>`, confirmButtonText: '好的' });
-    app.taskList = await API._callJsonpOnly('getTasks', {});
+    app.taskList = await API._call('getTasks');
     setTimeout(() => loadBankStatus(), 1000);
   } catch(e) {
     stopProgress(); clearInterval(timerTick);
@@ -1562,7 +1587,7 @@ async function loadResults() {
   const taskName = document.getElementById('results-task').value, area = document.getElementById('results-area');
   if (!taskName) { area.innerHTML = ''; return; } area.innerHTML = '<div class="text-muted small">載入中…</div>';
   try {
-    const results = await API._callJsonpOnly('getTaskResults', { taskName });
+    const results = await API._call('getTaskResults', { taskName });
     if (!results.length) { area.innerHTML = '<p class="text-muted">此任務尚無作答紀錄。</p>'; return; }
     const avg = Math.round(results.reduce((s,r)=>s+r.score,0)/results.length), high = Math.max(...results.map(r=>r.score)), low = Math.min(...results.map(r=>r.score));
     let html = `<div class="row g-2 mb-3"><div class="col-auto"><div class="alert alert-info py-1 px-3 mb-0">共 <b>${results.length}</b> 份</div></div><div class="col-auto"><div class="alert alert-success py-1 px-3 mb-0">平均 <b>${avg}</b> 分</div></div><div class="col-auto"><div class="alert alert-warning py-1 px-3 mb-0">最高 <b>${high}</b> / 最低 <b>${low}</b></div></div></div><div class="table-responsive"><table class="table table-hover table-sm align-middle"><thead class="table-primary"><tr><th>測驗時間</th><th>座號</th><th>姓名（匿名）</th><th>分數</th><th>歷時</th><th>明細</th></tr></thead><tbody>`;
@@ -1583,7 +1608,7 @@ async function loadAnalysis() {
   const taskName = document.getElementById('analysis-task').value, area = document.getElementById('analysis-area');
   if (!taskName) { area.innerHTML = ''; return; } area.innerHTML = '<div class="text-muted small">分析中…</div>';
   try {
-    const nodes = await API._callJsonpOnly('analyzeClassWeakNodes', { taskName });
+    const nodes = await API._call('analyzeClassWeakNodes', { taskName });
     if (!nodes.length) { area.innerHTML = '<p class="text-muted">此任務尚無足夠作答資料。</p>'; return; }
     let html = '<div class="row g-3">';
     nodes.forEach((n,i)=>{
@@ -1658,12 +1683,12 @@ async function genWorksheet() {
     clearInterval(rot); clearInterval(tick);
     document.getElementById('ws-gen-progress').style.display = 'none'; document.getElementById('ws-state-idle').style.display = '';
     const isTimeout = e.message.includes('fetch') || e.message.includes('逾時') || e.message.includes('timeout');
-    Swal.fire({ icon:'error', title:'生成失敗', html:'<b>錯誤：</b>'+esc(e.message)+(isTimeout?'<br><br><div class="alert alert-warning small text-start mb-0"><b>⚡ GAS 30秒超時是最常見原因：</b><br>1. 改用「Claude Worker（付費）」引擎<br>2. 或縮短學習單 Prompt</div>':''), confirmButtonText:'我知道了' });
+    Swal.fire({ icon:'error', title:'生成失敗', html:'<b>錯誤：</b>'+esc(e.message)+(isTimeout?'<br><br><div class="alert alert-warning small text-start mb-0"><b>⚡ GAS 30秒超時是最常見原因：</b><br>1. 改用「Claude Worker（付費）」引擎<br>2. 後端已更新至 v13.10.11（Prompt 已簡化），請確認 GAS 已部署最新版</div>':''), confirmButtonText:'我知道了' });
   }
 }
 
 // ==========================================
-// 類似題相關（保持不變）
+// 類似題相關
 // ==========================================
 const _simSelectedIds = {};
 function _buildLinkBoxes(taskName) {
@@ -1694,7 +1719,7 @@ function toggleSimQ(taskName, qid, checkbox) {
 }
 function _renderSimResult(area, data, taskName) {
   if(!_simSelectedIds[taskName])_simSelectedIds[taskName]=new Set();
-  const escapedTask=taskName.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const escapedTask=encodeURIComponent(taskName);
   let cardsHtml='',globalQIdx=0;
   data.forEach((item)=>{
     cardsHtml+=`<div class="mb-3"><div class="d-flex align-items-center mb-2"><span class="fw-bold small me-2">【${esc(item.node)}】</span><span class="badge bg-danger small">${item.errorCount||item.questions?.length||0} 筆錯誤</span></div>`;
@@ -1705,11 +1730,13 @@ function _renderSimResult(area, data, taskName) {
       const safeQidAttr=qid.replace(/"/g,'&quot;');
       const opts=q.type==='single'?(q.options||[]).map((o,oi)=>{const isAns='ABCD'[oi]===q.answer;return`<div class="d-flex align-items-start gap-1 py-1 border-bottom"><span class="badge ${isAns?'bg-success':'bg-light text-dark border'} flex-shrink-0">${'ABCD'[oi]}</span><span class="small">${esc(o)}</span></div>`;}).join(''):'';
       const hintHtml=q.hint?`<div class="small text-secondary mt-1">💡 ${esc(q.hint.replace(/^\[Level [ABCD]\]\s*/,''))}</div>`:'';
-      cardsHtml+=`<div class="sim-q-card" id="sqcard_${cbId}"><div class="d-flex align-items-start gap-2 mb-2"><input type="checkbox" class="sim-q-checkbox" id="${cbId}" onchange="toggleSimQ('${escapedTask}','${safeQidAttr}',this)"><label for="${cbId}" class="small fw-bold text-muted mb-0 flex-grow-1" style="cursor:pointer;">類似題 ${qi+1} <span class="badge text-white ms-1" style="background:${lvBg[lv]||'#9e9e9e'}">Level ${lv}</span></label></div><div class="small mb-2" style="white-space:pre-wrap;word-break:break-word;line-height:1.6">${esc(q.text)}</div>${opts}<div class="small text-success mt-2 fw-bold">✅ 正解：${esc(q.answer)}</div>${hintHtml}</div>`;
+      // ⭐ v13.10.9：使用 data-* 傳遞 taskName，避免 onclick 字串逸脫問題
+      cardsHtml+=`<div class="sim-q-card" id="sqcard_${cbId}"><div class="d-flex align-items-start gap-2 mb-2"><input type="checkbox" class="sim-q-checkbox" id="${cbId}" data-task="${esc(taskName)}" data-qid="${safeQidAttr}" onchange="toggleSimQ(this.dataset.task,this.dataset.qid,this)"><label for="${cbId}" class="small fw-bold text-muted mb-0 flex-grow-1" style="cursor:pointer;">類似題 ${qi+1} <span class="badge text-white ms-1" style="background:${lvBg[lv]||'#9e9e9e'}">Level ${lv}</span></label></div><div class="small mb-2" style="white-space:pre-wrap;word-break:break-word;line-height:1.6">${esc(q.text)}</div>${opts}<div class="small text-success mt-2 fw-bold">✅ 正解：${esc(q.answer)}</div>${hintHtml}</div>`;
     });
     cardsHtml+=`</div>`;
   });
-  area.innerHTML=`${_buildLinkBoxes(taskName)}<div class="d-flex gap-2 flex-wrap align-items-center mb-2 mt-3"><h6 class="fw-bold mb-0"><i class="fa-solid fa-dumbbell text-warning me-1"></i>錯誤類似題（共 ${data.length} 個節點）</h6><button class="btn btn-outline-secondary btn-sm" id="sim-toggle-btn" onclick="toggleSimPreview()"><i class="fa-solid fa-eye-slash me-1"></i>收起預覽</button><button class="btn btn-outline-warning btn-sm" onclick="genSimilarPractice('${escapedTask}', true)"><i class="fa-solid fa-rotate me-1"></i>重新生成</button></div><div id="sim-preview-area"><div class="border rounded p-3 bg-white">${cardsHtml}</div></div>`;
+  // ⭐ v13.10.9：重新生成按鈕也改用 data-task
+  area.innerHTML=`${_buildLinkBoxes(taskName)}<div class="d-flex gap-2 flex-wrap align-items-center mb-2 mt-3"><h6 class="fw-bold mb-0"><i class="fa-solid fa-dumbbell text-warning me-1"></i>錯誤類似題（共 ${data.length} 個節點）</h6><button class="btn btn-outline-secondary btn-sm" id="sim-toggle-btn" onclick="toggleSimPreview()"><i class="fa-solid fa-eye-slash me-1"></i>收起預覽</button><button class="btn btn-outline-warning btn-sm" data-task="${esc(taskName)}" onclick="genSimilarPractice(this.dataset.task, true)"><i class="fa-solid fa-rotate me-1"></i>重新生成</button></div><div id="sim-preview-area"><div class="border rounded p-3 bg-white">${cardsHtml}</div></div>`;
   app_sim.previewOpen=true;
 }
 async function _saveSimilarToBank(taskName, questions) {
@@ -1732,15 +1759,15 @@ async function genSimilarPractice(taskName, forceRegen) {
     if(!data||!data.length){
       let reason='尚無足夠錯題資料';
       try{
-        const results=await API._callJsonpOnly('getTaskResults',{taskName});
+        const results=await API._call('getTaskResults',{taskName});
         if(!results||!results.length){reason='⚠️ 尚無學生作答紀錄，完成測驗後才能生成類似題。';}
         else{const allCorrect=results.every(r=>(r.details||[]).every(d=>d.correct));if(allCorrect){reason='✅ 所有學生全部答對！無需補救練習。';}else{reason='⚠️ Bank 題庫尚無此節點的類似題。請先完成出題，再重新整理頁面。';}}
       }catch(e){reason='⚠️ 診斷失敗：'+e.message;}
       let errorNodes=[];
-      try{const rr=await API._callJsonpOnly('getTaskResults',{taskName});const nodeMap={};(rr||[]).forEach(r=>(r.details||[]).forEach(d=>{if(!d.correct&&d.node)nodeMap[d.node]=(nodeMap[d.node]||0)+1;}));errorNodes=Object.keys(nodeMap).sort((a,b)=>nodeMap[b]-nodeMap[a]).slice(0,3);}catch(e){}
+      try{const rr=await API._call('getTaskResults',{taskName});const nodeMap={};(rr||[]).forEach(r=>(r.details||[]).forEach(d=>{if(!d.correct&&d.node)nodeMap[d.node]=(nodeMap[d.node]||0)+1;}));errorNodes=Object.keys(nodeMap).sort((a,b)=>nodeMap[b]-nodeMap[a]).slice(0,3);}catch(e){}
       const safeId='genBtn_'+Date.now(),genBtn=errorNodes.length?safeId:'';
-      area.innerHTML=`${_buildLinkBoxes(taskName)}<div class="alert alert-info small py-2 mt-2"><i class="fa-solid fa-circle-info me-1"></i>${reason}${genBtn?'<br><button id="'+genBtn+'" class="btn btn-warning btn-sm mt-2"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>立即 AI 生成類似題</button>':''}</div>`;
-      if(genBtn){document.getElementById(genBtn).addEventListener('click',function(){genSimilarOnDemand(taskName,errorNodes,this);});}
+      area.innerHTML=`${_buildLinkBoxes(taskName)}<div class="alert alert-info small py-2 mt-2"><i class="fa-solid fa-circle-info me-1"></i>${reason}${genBtn?`<br><button id="${genBtn}" data-task="${esc(taskName)}" class="btn btn-warning btn-sm mt-2"><i class="fa-solid fa-wand-magic-sparkles me-1"></i>立即 AI 生成類似題</button>`:''}</div>`;
+      if(genBtn){document.getElementById(genBtn).addEventListener('click',function(){genSimilarOnDemand(this.dataset.task,errorNodes,this);});}
       return;
     }
     app_sim.data=data;app_sim.taskName=taskName;app_sim.previewOpen=false;
@@ -1755,7 +1782,7 @@ async function genSimilarPractice(taskName, forceRegen) {
 async function _genSimilarViaClaude(taskName,nodes){
   const workerUrl=app.claudeWorkerUrl||DEFAULT_CLAUDE_WORKER_URL;
   let grade='三年級',subject='數學';
-  try{const tasks=await API._callJsonpOnly('getTasks',{});const t=(tasks||[]).find(t=>t.taskName===taskName);if(t){grade=t.grade||grade;subject=t.subject||subject;}}catch(e){}
+  try{const tasks=await API._call('getTasks');const t=(tasks||[]).find(t=>t.taskName===taskName);if(t){grade=t.grade||grade;subject=t.subject||subject;}}catch(e){}
   const resp=await fetch(workerUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'questions',nodes,grade,subject,qcount:2})});
   if(!resp.ok)throw new Error('Claude Worker HTTP '+resp.status);
   const json=await resp.json();
@@ -1801,7 +1828,7 @@ function _sanitizeWsHtml(raw) {
   if(firstTag>0&&lastTag>firstTag)s=s.substring(firstTag,lastTag+1).trim();
   else if(firstTag<0)s='<p>'+s.replace(/\n/g,'<br>')+'</p>';
   if(s.includes('<head>')&&!s.match(/charset/i))s=s.replace('<head>','<head><meta charset="UTF-8">');
-  if(!s.includes('<html')){s='<!DOCTYPE html><html lang="zh-TW"><head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<style>\nbody{font-family:\'Noto Sans TC\',\'Microsoft JhengHei\',sans-serif;max-width:210mm;margin:0 auto;padding:20px;font-size:14px;line-height:1.8;}\nh1,h2,h3,h4{color:#1e88e5;}\ntable{border-collapse:collapse;width:100%;} td,th{border:1px solid #ccc;padding:6px 10px;}\n.c-box,.c-level{border:2px solid #1565c0;padding:10px;margin:10px 0;border-radius:6px;}\n.b-box,.b-level{border:2px solid #f57c00;padding:10px;margin:10px 0;border-radius:6px;}\n.a-box,.a-level{border:2px solid #d32f2f;padding:10px;margin:10px 0;border-radius:6px;}\n.answer-key,.answer-section{background:#f9f9f9;border-left:4px solid #4caf50;padding:8px 14px;margin-top:10px;}\n.student-space{height:60px;border-bottom:1px solid #aaa;margin:10px 0;}\n.section{margin-bottom:20px;page-break-inside:avoid;break-inside:avoid;}\n@page{margin:12mm 15mm;}\n</style></head><body>'+s+'</body></html>';}
+  if(!s.includes('<html')){s='<!DOCTYPE html><html lang="zh-TW"><head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<style>\nbody{font-family:\'Noto Sans TC\',\'Microsoft JhengHei\',sans-serif;max-width:210mm;margin:0 auto;padding:20px;font-size:16px;line-height:2;}\nh1,h2,h3,h4{color:#1e88e5;}\ntable{border-collapse:collapse;width:100%;} td,th{border:1px solid #ccc;padding:6px 10px;}\n.c-box,.c-level{border:2px solid #1565c0;padding:10px;margin:10px 0;border-radius:6px;}\n.b-box,.b-level{border:2px solid #f57c00;padding:10px;margin:10px 0;border-radius:6px;}\n.a-box,.a-level{border:2px solid #d32f2f;padding:10px;margin:10px 0;border-radius:6px;}\n.answer-key,.answer-section{background:#fffde7;border-left:4px solid #f9a825;padding:8px 14px;margin-top:10px;}\n.student-space{height:60px;border-bottom:1px solid #aaa;margin:10px 0;}\n.section{margin-bottom:20px;page-break-inside:avoid;break-inside:avoid;border:1px solid #e0e0e0;border-radius:8px;padding:14px;}\n@page{margin:12mm 15mm;}\n</style></head><body>'+s+'</body></html>';}
   return s;
 }
 function _writeToIframe(frame, html) {
