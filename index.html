@@ -758,36 +758,26 @@ const API = {
     const payloadStr = JSON.stringify({ action, data });
     const isLarge = payloadStr.length > 1500 || action === 'uploadTaskData' || action === 'saveWorksheetToCloud' || action === 'saveBatchFromWorker';
     if (!isLarge) {
+      // ⭐ v13.10.9fix3：Worker 3s timeout -> 失敗直接 fetch POST GAS（完全棄用 JSONP）
       try {
-        // ⭐ v13.10.9fix：Worker fetch 加入 3 秒 timeout，避免無回應時永久 pending
-        const workerAbort = new AbortController();
-        const workerTimer = setTimeout(() => workerAbort.abort(), 3000);
-        let workerResp;
-        try {
-          workerResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr), { method: 'GET', redirect: 'follow', signal: workerAbort.signal });
-        } finally { clearTimeout(workerTimer); }
-        if (!workerResp.ok) throw new Error('Worker HTTP ' + workerResp.status);
-        let json; try { json = await workerResp.json(); } catch(pe) { throw new Error('Worker 回應無法解析：' + pe.message); }
-        if (json.status === 'success') return json.data;
-        throw new Error(json.message || '後端回報錯誤');
-      } catch(workerErr) { console.warn('[API] Worker 失敗，降級使用 JSONP：', workerErr.message); }
-      return new Promise((resolve, reject) => {
-        const cbName = '_gas_cb_' + Date.now() + '_' + Math.floor(Math.random() * 99999);
-        let isDone = false;
-        const timer = setTimeout(() => { if (isDone) return; isDone = true; cleanup(); reject(new Error('連線逾時（15秒）。')); }, 15000);
-        const cleanup = () => { delete window[cbName]; const el = document.getElementById(cbName); if (el) el.remove(); };
-        window[cbName] = (res) => {
-          if (isDone) return; isDone = true; clearTimeout(timer); cleanup();
-          if (res && res.status === 'success') resolve(res.data);
-          else reject(new Error(res ? res.message : '後端發生未知錯誤'));
-        };
-        const sep = app.gasUrl.includes('?') ? '&' : '?';
-        const script = document.createElement('script');
-        script.id = cbName;
-        script.src = app.gasUrl + sep + 'payload=' + encodeURIComponent(payloadStr) + '&callback=' + cbName;
-        script.onerror = () => { if (isDone) return; cleanup(); isDone = true; clearTimeout(timer); reject(new Error('Failed to fetch')); };
-        document.body.appendChild(script);
-      });
+        const wAbort = new AbortController();
+        const wTimer = setTimeout(() => wAbort.abort(), 3000);
+        let wResp;
+        try { wResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr), { method: 'GET', redirect: 'follow', signal: wAbort.signal }); }
+        finally { clearTimeout(wTimer); }
+        if (!wResp.ok) throw new Error('Worker HTTP ' + wResp.status);
+        const wJson = await wResp.json();
+        if (wJson.status === 'success') return wJson.data;
+        throw new Error(wJson.message || 'Worker 回報錯誤');
+      } catch(workerErr) { console.warn('[API] Worker 失敗，降級直接 POST GAS：', workerErr.message); }
+      // fallback：直接 fetch POST GAS
+      try {
+        const resp = await fetch(app.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: payloadStr, redirect: 'follow' });
+        if (!resp.ok) throw new Error('GAS HTTP ' + resp.status);
+        const json = await resp.json();
+        if (json.status !== 'success') throw new Error(json.message || '後端回報錯誤');
+        return json.data;
+      } catch(postErr) { throw new Error('GAS 連線失敗（' + postErr.message + '）'); }
     } else {
       try {
         const resp = await fetch(app.gasUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: payloadStr, redirect: 'follow' });
@@ -815,59 +805,12 @@ const API = {
     }
   },
   _callDirect: async (action, data = {}) => {
-    const payloadStr = JSON.stringify({ action, data });
-    try {
-      const dAbort = new AbortController();
-      const dTimer = setTimeout(() => dAbort.abort(), 3000);
-      let dResp;
-      try { dResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr) + '&_t=' + Date.now(), { method: 'GET', redirect: 'follow', cache: 'no-store', signal: dAbort.signal }); }
-      finally { clearTimeout(dTimer); }
-      if (!dResp.ok) throw new Error('Worker HTTP ' + dResp.status);
-      const json = await dResp.json();
-      if (json.status === 'success') return json.data;
-      throw new Error(json.message || '後端回報錯誤');
-    } catch(workerErr) { console.warn('[callDirect] Worker 失敗，降級 JSONP：', workerErr.message); }
-    return new Promise((resolve, reject) => {
-      const cbName = '_gas_direct_' + Date.now() + '_' + Math.floor(Math.random() * 99999);
-      let isDone = false;
-      const timer = setTimeout(() => { if (isDone) return; isDone = true; cleanup(); reject(new Error('直連逾時（25秒）')); }, 25000);
-      const cleanup = () => { delete window[cbName]; const el = document.getElementById(cbName); if (el) el.remove(); };
-      window[cbName] = (res) => {
-        if (isDone) return; isDone = true; clearTimeout(timer); cleanup();
-        if (res && res.status === 'success') resolve(res.data);
-        else reject(new Error(res ? res.message : '後端發生未知錯誤'));
-      };
-      const sep = app.gasUrl.includes('?') ? '&' : '?';
-      const script = document.createElement('script');
-      script.id = cbName;
-      script.src = app.gasUrl + sep + 'payload=' + encodeURIComponent(payloadStr) + '&_t=' + Date.now() + '&callback=' + cbName;
-      script.onerror = () => { if (isDone) return; cleanup(); isDone = true; clearTimeout(timer); reject(new Error('直連 JSONP 失敗')); };
-      document.body.appendChild(script);
-    });
+    // ⭐ v13.10.9fix3：直接 POST GAS（棄用 JSONP）
+    return API._call(action, data);
   },
-  _callJsonpOnly: (action, data = {}) => {
-    const payloadStr = JSON.stringify({ action, data });
-    return new Promise((resolve, reject) => {
-      const cbName = '_gas_jsonp_' + Date.now() + '_' + Math.floor(Math.random() * 99999);
-      let isDone = false;
-      const timer = setTimeout(() => { if (isDone) return; isDone = true; cleanup(); reject(new Error('JSONP 逾時（30秒）')); }, 30000);
-      const cleanup = () => { delete window[cbName]; const el = document.getElementById(cbName); if (el) el.remove(); };
-      window[cbName] = (res) => {
-        if (isDone) return; isDone = true; clearTimeout(timer); cleanup();
-        if (res && res.status === 'success') resolve(res.data);
-        else reject(new Error(res ? res.message : '後端發生未知錯誤'));
-      };
-      const sep = app.gasUrl.includes('?') ? '&' : '?';
-      const anti = '_t=' + Date.now() + '&_r=' + Math.floor(Math.random() * 9999999);
-      const script = document.createElement('script');
-      script.id = cbName;
-      script.src = app.gasUrl + sep + 'payload=' + encodeURIComponent(payloadStr) + '&' + anti + '&callback=' + cbName;
-      script.onerror = () => {
-        if (isDone) return; cleanup(); isDone = true; clearTimeout(timer);
-        API._callDirect(action, data).then(resolve).catch(reject);
-      };
-      document.body.appendChild(script);
-    });
+  _callJsonpOnly: async (action, data = {}) => {
+    // ⭐ v13.10.9fix3：直接 POST GAS（棄用 JSONP，此環境 JSONP 不可用）
+    return API._call(action, data);
   },
   _submitWithRetry: async (action, data={}) => API._call(action, data),
   getTasks:()=>API._call('getTasks'),
