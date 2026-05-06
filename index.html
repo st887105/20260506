@@ -759,7 +759,13 @@ const API = {
     const isLarge = payloadStr.length > 1500 || action === 'uploadTaskData' || action === 'saveWorksheetToCloud' || action === 'saveBatchFromWorker';
     if (!isLarge) {
       try {
-        const workerResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr), { method: 'GET', redirect: 'follow' });
+        // ⭐ v13.10.9fix：Worker fetch 加入 3 秒 timeout，避免無回應時永久 pending
+        const workerAbort = new AbortController();
+        const workerTimer = setTimeout(() => workerAbort.abort(), 3000);
+        let workerResp;
+        try {
+          workerResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr), { method: 'GET', redirect: 'follow', signal: workerAbort.signal });
+        } finally { clearTimeout(workerTimer); }
         if (!workerResp.ok) throw new Error('Worker HTTP ' + workerResp.status);
         let json; try { json = await workerResp.json(); } catch(pe) { throw new Error('Worker 回應無法解析：' + pe.message); }
         if (json.status === 'success') return json.data;
@@ -811,9 +817,13 @@ const API = {
   _callDirect: async (action, data = {}) => {
     const payloadStr = JSON.stringify({ action, data });
     try {
-      const workerResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr) + '&_t=' + Date.now(), { method: 'GET', redirect: 'follow', cache: 'no-store' });
-      if (!workerResp.ok) throw new Error('Worker HTTP ' + workerResp.status);
-      const json = await workerResp.json();
+      const dAbort = new AbortController();
+      const dTimer = setTimeout(() => dAbort.abort(), 3000);
+      let dResp;
+      try { dResp = await fetch(WORKER_URL + '?payload=' + encodeURIComponent(payloadStr) + '&_t=' + Date.now(), { method: 'GET', redirect: 'follow', cache: 'no-store', signal: dAbort.signal }); }
+      finally { clearTimeout(dTimer); }
+      if (!dResp.ok) throw new Error('Worker HTTP ' + dResp.status);
+      const json = await dResp.json();
       if (json.status === 'success') return json.data;
       throw new Error(json.message || '後端回報錯誤');
     } catch(workerErr) { console.warn('[callDirect] Worker 失敗，降級 JSONP：', workerErr.message); }
