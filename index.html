@@ -3,18 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <!-- 版號 v13.10.5
-    v13.10.4 基礎上修正（Bank 寫入失敗根治）：
-    1. saveBatchFromWorker 加入 isLarge 白名單 → 強制走 POST，避免 JSONP GET URL 過長被截斷
-    2. Claude 題目讀取防禦：兼容 result.questions 與 result.data.questions 兩種 Worker 回傳格式
-    3. 回存前自動補全 grade/subject 欄位，確保 Bank 科目過濾正確
-    --- 繼承 v13.10.4 修正 ---
+  <!-- 版號 v13.10.6
+    v13.10.5 基礎上修正：
+    1. 錯誤提示智慧化：Claude Worker 408 超時不再顯示「確認 Gemini API 金鑰」，改為顯示 Worker 超時排查建議
+    2. Claude Worker 分批出題：每批最多 10 個節點，避免節點多時 408 超時
+    3. 避免重複生成：出題前先查 Bank 已有哪些節點，跳過已有題目的節點
+    4. 分批進度條：使用者可看到「第 N/M 批完成」的即時進度
+    --- 繼承 v13.10.5 修正 ---
     4. 出題方式文字：移除「GAS 模式下有效」限制提示
     5. 每批次出題完成立即回存 Bank
     6. 出題完成後強制 loadBankStatus() 刷新
     7. generateQuiz 前端再次過濾：確保科目完全匹配
   -->
-  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.5)</title>
+  <title>車城國小｜學力檢測 AI 智慧補救系統 (v13.10.6)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
@@ -600,7 +601,7 @@
 </main>
 <footer class="mt-4">
   <div class="container px-3">
-    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.5 ｜
+    車城國小資訊老師 @ Google Gemini 協作設計 ｜ v13.10.6 ｜
     <a href="https://github.com/st887105/20260404" target="_blank"><i class="fa-brands fa-github me-1"></i>原始碼</a>
   </div>
 </footer>
@@ -873,8 +874,37 @@ const API = {
   getPracticeSettings:()=>API._callJsonpOnly('getPracticeSettings',{}),
   savePracticeSettings:(nodeCount,qCount,pwd)=>API._callJsonpOnly('savePracticeSettings',{nodeCount,qCount,pwd}),
   saveBatchFromWorker:(taskName,questions)=>API._call('saveBatchFromWorker',{taskName,questions}),
-  generateAllBatchClaude: async (nodes, grade, subject) => {
-    return API._callClaude('questions', { nodes, grade, subject, qcount: 3 });
+  // ⭐ v13.10.6 修正2+3：分批出題（每批最多10節點）+ 跳過已有題目的節點
+  generateAllBatchClaude: async (nodes, grade, subject, taskName) => {
+    const BATCH_SIZE = 10; // 每批最多節點數，避免 408 超時
+    // 若有 taskName，先查 Bank 已有哪些節點，避免重複生成
+    let existingNodes = new Set();
+    if (taskName) {
+      try {
+        const existing = await API._call('getTaskQuestions', { taskName });
+        (existing.questions || []).forEach(q => { if (q.node) existingNodes.add(q.node); });
+        console.log('[Claude] Bank 已有節點：', [...existingNodes]);
+      } catch(e) { console.warn('[Claude] 查詢已有節點失敗（不影響出題）：', e.message); }
+    }
+    // 過濾掉已有題目的節點
+    const needNodes = nodes.filter(n => !existingNodes.has(n));
+    if (!needNodes.length) {
+      console.log('[Claude] 所有節點已有題目，略過出題');
+      return { questions: [], skipped: nodes.length };
+    }
+    if (existingNodes.size > 0) {
+      console.log(`[Claude] 跳過已有節點 ${existingNodes.size} 個，僅出題 ${needNodes.length} 個節點`);
+    }
+    // 分批出題，每批 BATCH_SIZE 個節點
+    const allQuestions = [];
+    for (let i = 0; i < needNodes.length; i += BATCH_SIZE) {
+      const batchNodes = needNodes.slice(i, i + BATCH_SIZE);
+      console.log(`[Claude] 批次 ${Math.floor(i/BATCH_SIZE)+1}/${Math.ceil(needNodes.length/BATCH_SIZE)}：`, batchNodes);
+      const result = await API._callClaude('questions', { nodes: batchNodes, grade, subject, qcount: 3 });
+      const batchQs = (result && (result.questions || (result.data && result.data.questions))) || [];
+      allQuestions.push(...batchQs);
+    }
+    return { questions: allQuestions };
   },
 };
 
@@ -1005,13 +1035,31 @@ async function wizardCreateAndGenerate() {
     if (pMsg) pMsg.textContent = '✅ 名冊已儲存，開始 AI 出題…';
     const effectiveNodes = uniqueNodes.length > 0 ? uniqueNodes : ['通用基礎練習'];
     if (app.wizEngine === 'claude') {
-      if (pMsg) pMsg.innerHTML = '🔮 Claude Worker 出題中（無超時限制）…';
-      if (pBar) pBar.style.width = '30%';
-      const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject);
+      const totalBatchesWiz = Math.ceil(effectiveNodes.length / 10);
+      if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatchesWiz} 批）…`;
+      if (pBar) pBar.style.width = '20%';
+      // ⭐ v13.10.6：分批進度更新
+      let batchDoneWiz = 0;
+      const origCallClaudeWiz = API._callClaude.bind(API);
+      API._callClaude = async (mode, data) => {
+        const r = await origCallClaudeWiz(mode, data);
+        if (mode === 'questions') {
+          batchDoneWiz++;
+          const pct = Math.min(85, 20 + Math.round((batchDoneWiz / Math.max(totalBatchesWiz, 1)) * 65));
+          if (pBar) pBar.style.width = pct + '%';
+          if (pMsg) pMsg.innerHTML = `🔮 Claude Worker 出題：第 <b>${batchDoneWiz}</b>/${totalBatchesWiz} 批完成…`;
+        }
+        return r;
+      };
+      const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
+        API._callClaude = origCallClaudeWiz;
+      });
       if (pBar) pBar.style.width = '90%';
-      // ⭐ v13.10.5 修正2：防禦 data 包裝格式，補全 grade/subject
+      // ⭐ v13.10.5+v13.10.6：防禦 data 包裝格式，補全 grade/subject，跳過已有節點
       const claudeQs = (result && (result.questions || (result.data && result.data.questions))) || [];
-      if (claudeQs.length) {
+      if (result && result.skipped) {
+        if (pMsg) pMsg.innerHTML = `✅ 所有節點已有題目（共跳過 ${result.skipped} 個節點），無需重複生成`;
+      } else if (claudeQs.length) {
         if (pMsg) pMsg.textContent = `💾 題目回存題庫中（${claudeQs.length} 題）…`;
         try {
           const enriched = claudeQs.map(q => Object.assign({ grade, subject }, q));
@@ -1050,7 +1098,13 @@ async function wizardCreateAndGenerate() {
   } catch(e) {
     stopProgress();
     if (pMsg) pMsg.innerHTML = `<span class="text-danger">❌ 失敗：${esc(e.message)}</span>`;
-    Swal.fire({ icon: 'error', title: '建立任務失敗', text: e.message });
+    // ⭐ v13.10.6 修正1（精靈）：根據引擎顯示正確提示
+    const isClaudeWiz = (app.wizEngine === 'claude');
+    const isWizTimeout = e.message.includes('408') || e.message.includes('思考時間') || e.message.includes('timeout');
+    let wizTroubleshoot = isClaudeWiz
+      ? (isWizTimeout ? '節點數過多導致 Claude Worker 超時（408）。建議節點數控制在 15 個以內，或改用 GAS 模式。' : 'Claude Worker 連線失敗，請確認 Worker 網址正確（⚙️設定頁），或改用 GAS 模式。')
+      : '請確認 GAS 後端已設定 Gemini API 金鑰，或重新整理頁面再試。';
+    Swal.fire({ icon: 'error', title: '建立任務失敗', html: `<b>錯誤：</b>${esc(e.message)}<br><div class="alert alert-warning small text-start mt-2 mb-0">${wizTroubleshoot}</div>` });
   }
 }
 
@@ -1268,13 +1322,34 @@ async function uploadAndGenerate() {
     pBar.style.width = '8%'; pMsg.textContent = '✅ 學生名冊已儲存，開始 AI 出題…';
     const effectiveNodes = app.excelNodes.length > 0 ? app.excelNodes : ['通用基礎練習'];
     if (app.upEngine === 'claude') {
-      pMsg.innerHTML = '🔮 Claude Worker 出題中（無超時限制）…';
-      pBar.style.width = '30%';
-      const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject);
+      const totalBatches = Math.ceil(effectiveNodes.length / 10);
+      pMsg.innerHTML = `🔮 Claude Worker 出題中（共 ${effectiveNodes.length} 個節點，分 ${totalBatches} 批）…`;
+      pBar.style.width = '20%';
+      // ⭐ v13.10.6：分批進度回呼（讓進度條動起來）
+      const origCallClaude = API._callClaude.bind(API);
+      let batchDone = 0;
+      const batchTotal = totalBatches;
+      const onBatchProgress = () => {
+        batchDone++;
+        const pct = Math.min(85, 20 + Math.round((batchDone / Math.max(batchTotal, 1)) * 65));
+        pBar.style.width = pct + '%';
+        pMsg.innerHTML = `🔮 Claude Worker 出題：第 <b>${batchDone}</b>/${batchTotal} 批完成…`;
+      };
+      // 暫時攔截 _callClaude 以更新進度
+      API._callClaude = async (mode, data) => {
+        const r = await origCallClaude(mode, data);
+        if (mode === 'questions') onBatchProgress();
+        return r;
+      };
+      const result = await API.generateAllBatchClaude(effectiveNodes, grade, subject, taskName).finally(() => {
+        API._callClaude = origCallClaude; // 還原
+      });
       pBar.style.width = '90%';
-      // ⭐ v13.10.5 修正3：防禦 data 包裝格式，補全 grade/subject
+      // ⭐ v13.10.5+v13.10.6：防禦 data 包裝格式，補全 grade/subject
       const claudeQs = (result && (result.questions || (result.data && result.data.questions))) || [];
-      if (claudeQs.length) {
+      if (result && result.skipped) {
+        pMsg.innerHTML = `✅ 所有節點已有題目（共跳過 ${result.skipped} 個節點），無需重複生成`;
+      } else if (claudeQs.length) {
         pMsg.textContent = `💾 題目回存題庫中（${claudeQs.length} 題）…`;
         try {
           const enriched = claudeQs.map(q => Object.assign({ grade, subject }, q));
@@ -1310,7 +1385,20 @@ async function uploadAndGenerate() {
   } catch(e) {
     stopProgress(); const elapsed = elapsedStr();
     pMsg.innerHTML = `<span class="text-danger">❌ 失敗（${elapsed}）：${esc(e.message)}</span>`; pEl.textContent = '';
-    Swal.fire({ icon: 'error', title: '出題中斷', html: `<b>錯誤：</b>${esc(e.message)}<br><br><div class="alert alert-warning small text-start mb-0"><b>🔧 排查：</b><br>1. 確認已設定 Gemini API 金鑰<br>2. 重新整理頁面再試一次</div>`, confirmButtonText: '我知道了' });
+    // ⭐ v13.10.6 修正1：根據引擎顯示正確的排查提示
+    const isClaudeEngine = (app.upEngine === 'claude');
+    const isWorkerTimeout = e.message.includes('408') || e.message.includes('思考時間') || e.message.includes('timeout') || e.message.includes('Timeout');
+    let troubleshootHtml = '';
+    if (isClaudeEngine) {
+      if (isWorkerTimeout) {
+        troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>⚡ Claude Worker 超時（408）：</b><br>1. 節點數太多（目前 ${app.excelNodes.length} 個），建議一次不超過 15 個節點<br>2. 至 ⚙️設定頁確認 Claude Worker 網址正確<br>3. 稍後再試（Worker 可能暫時過載）</div>`;
+      } else {
+        troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>🔧 Claude Worker 排查：</b><br>1. 確認 Claude Worker 網址設定正確（⚙️設定頁）<br>2. 確認 Worker 服務正常運作<br>3. 可改用「GAS 模式」作為備援</div>`;
+      }
+    } else {
+      troubleshootHtml = `<div class="alert alert-warning small text-start mb-0"><b>🔧 GAS 模式排查：</b><br>1. 確認已在 GAS 後端設定 Gemini API 金鑰<br>2. 重新整理頁面再試一次</div>`;
+    }
+    Swal.fire({ icon: 'error', title: '出題中斷', html: `<b>錯誤：</b>${esc(e.message)}<br><br>${troubleshootHtml}`, confirmButtonText: '我知道了' });
   }
 }
 
