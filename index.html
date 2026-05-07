@@ -1395,11 +1395,13 @@ async function loadBankStatus() {
           </div>
           <div class="mb-2">
             <label class="form-label small fw-bold text-muted mb-1">重新出題模式</label>
-            <div class="d-flex gap-2 flex-wrap small">
-              <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="ai" checked><label class="form-check-label">純 AI</label></div>
+            <div class="d-flex gap-2 flex-wrap small mb-1">
+              <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="ai" checked><label class="form-check-label">純 AI（GAS）</label></div>
               <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="pdf"><label class="form-check-label">PDF</label></div>
               <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="mixed"><label class="form-check-label">混合</label></div>
+              <div class="form-check"><input class="form-check-input" type="radio" name="regen-mode-${safeKey}" value="claude"><label class="form-check-label" style="color:#7c3aed;font-weight:600;"><i class="fa-solid fa-wand-magic-sparkles me-1" style="color:#7c3aed;"></i>Claude Worker<span class="claude-badge ms-1">付費</span></label></div>
             </div>
+            <div class="small text-muted" style="font-size:.7rem;"><i class="fa-solid fa-circle-info me-1"></i>GAS 免費版30秒限制易超時 → 改用 Claude Worker 可解決</div>
           </div>
           <div class="d-flex gap-2 flex-wrap mt-auto">
             <button class="btn btn-sm btn-outline-primary" data-task="${esc(task.taskName)}" onclick="regenTask(this.dataset.task)"><i class="fa-solid fa-rotate me-1"></i>重新出題</button>
@@ -1515,24 +1517,65 @@ async function previewBankQuestions(taskName) {
 async function regenTask(taskName) {
   const key = 'regen-mode-' + taskName.replace(/[^a-zA-Z0-9]/g, '_');
   const modeEl = document.querySelector(`input[name="${key}"]:checked`), mode = modeEl ? modeEl.value : 'ai';
-  const r = await Swal.fire({ title: '重新出題', html: `確定為「${esc(taskName)}」重新出題？`, showCancelButton: true, confirmButtonText: '確定開始', cancelButtonText: '取消' });
+
+  // 確認對話
+  const confirmHtml = mode === 'claude'
+    ? `確定用 <b style="color:#7c3aed;">Claude Worker</b> 為「${esc(taskName)}」重新出題？<br><span class="small text-muted">無30秒限制，適合節點數多的任務。</span>`
+    : `確定為「${esc(taskName)}」重新出題？`;
+  const r = await Swal.fire({ title: '重新出題', html: confirmHtml, showCancelButton: true, confirmButtonText: '確定開始', cancelButtonText: '取消' });
   if (!r.isConfirmed) return;
+
   _waitStart = Date.now();
-  Swal.fire({ title: '⏳ AI 出題中', html: `<div id="regen-status" class="fw-bold mb-2 text-success">${WAITING_MSGS[0]}</div><div class="progress mb-2"><div id="regen-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%;transition:width .6s;"></div></div><div class="d-flex justify-content-between text-muted small"><span id="regen-detail">初始化中…</span><span id="regen-timer">已等待 0 秒</span></div>`, allowOutsideClick: false, showConfirmButton: false });
-  const timerTick = setInterval(() => { const el = document.getElementById('regen-timer'); if (el) el.textContent = `已等待 ${Math.round((Date.now() - _waitStart) / 1000)} 秒`; }, 1000);
+  Swal.fire({
+    title: mode === 'claude' ? '🔮 Claude Worker 出題中' : '⏳ AI 出題中',
+    html: `<div id="regen-status" class="fw-bold mb-2 text-success">${WAITING_MSGS[0]}</div><div class="progress mb-2"><div id="regen-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" style="width:0%;transition:width .6s;"></div></div><div class="d-flex justify-content-between text-muted small"><span id="regen-detail">初始化中…</span><span id="regen-timer">已等待 0 秒</span></div>`,
+    allowOutsideClick: false, showConfirmButton: false
+  });
+  const timerTick = setInterval(() => {
+    const el = document.getElementById('regen-timer');
+    if (el) el.textContent = `已等待 ${Math.round((Date.now() - _waitStart) / 1000)} 秒`;
+  }, 1000);
+
   try {
-    let batchIndex = 0, totalBatches = null;
-    while (true) {
-      let folderId = ''; if (mode !== 'ai') { try { folderId = await _gasPost('getFolderId'); } catch(e) {} }
-      const result = await _gasPost('regenerateBatchForTask', {taskName, batchIndex, mode, folderId});
-      totalBatches = result.total || totalBatches || 1; const pct = Math.round((result.current / totalBatches) * 100);
+    if (mode === 'claude') {
+      // ⭐ v13.12.0：Claude Worker 路徑
+      // 先取任務的節點、年級、科目
+      const taskInfo = app.taskList.find(t => t.taskName === taskName);
+      const grade = taskInfo?.grade || '';
+      const subject = taskInfo?.subject || '';
+      const nodes = _toArray(taskInfo?.weakNodes).filter(isValidNode);
+      if (!nodes.length) throw new Error('此任務無有效弱點節點，無法使用 Claude Worker 出題');
+
       const barEl = document.getElementById('regen-bar'), detEl = document.getElementById('regen-detail');
-      if (barEl) barEl.style.width = pct + '%';
-      if (detEl) detEl.textContent = `第 ${result.current}/${totalBatches} 批（${pct}%）`;
-      if (result.done) break; batchIndex++; await sleep(6000);
+      if (detEl) detEl.textContent = `呼叫 Claude Worker（共 ${nodes.length} 個節點）…`;
+      if (barEl) barEl.style.width = '10%';
+
+      const result = await API.generateAllBatchClaude(nodes, grade, subject, taskName);
+
+      if (barEl) barEl.style.width = '100%';
+      if (detEl) detEl.innerHTML = `✅ 完成！共存入 <b>${result?.saved || 0}</b> 題`;
+      clearInterval(timerTick);
+      Swal.fire({
+        icon: 'success', title: '🎉 Claude 出題完成！',
+        html: `耗時 <b>${elapsedStr()}</b>，存入 <b>${result?.saved || 0}</b> 題${result?.failed?.length ? `<br><span class="text-warning small">失敗批次：${result.failed.join(', ')}</span>` : ''}`,
+        confirmButtonText: '好的'
+      });
+    } else {
+      // 原有 GAS 批次路徑
+      let batchIndex = 0, totalBatches = null;
+      while (true) {
+        let folderId = ''; if (mode !== 'ai') { try { folderId = await _gasPost('getFolderId'); } catch(e) {} }
+        const result = await _gasPost('regenerateBatchForTask', {taskName, batchIndex, mode, folderId});
+        totalBatches = result.total || totalBatches || 1;
+        const pct = Math.round((result.current / totalBatches) * 100);
+        const barEl = document.getElementById('regen-bar'), detEl = document.getElementById('regen-detail');
+        if (barEl) barEl.style.width = pct + '%';
+        if (detEl) detEl.textContent = `第 ${result.current}/${totalBatches} 批（${pct}%）`;
+        if (result.done) break; batchIndex++; await sleep(6000);
+      }
+      clearInterval(timerTick);
+      Swal.fire({ icon: 'success', title: '🎉 出題完成！', html: `耗時 <b>${elapsedStr()}</b>`, confirmButtonText: '好的' });
     }
-    clearInterval(timerTick);
-    Swal.fire({ icon: 'success', title: '🎉 出題完成！', html: `耗時 <b>${elapsedStr()}</b>`, confirmButtonText: '好的' });
     setTimeout(() => loadBankStatus(), 1000);
   } catch(e) {
     clearInterval(timerTick);
