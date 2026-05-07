@@ -1090,6 +1090,67 @@ function populateAdminTaskDropdowns() {
 // ==========================================
 // 📁 Excel 解析
 // ==========================================
+// ⭐ v13.12.0：解析考古題 Excel 格式，取出全班「題目平均答對率（第一次）」
+function _parseArchiveExcel(rows) {
+  // 判斷依據：Row0[0]='學生', Row0[2]='節點平均答對率', Row0[4]='題目平均答對率'
+  const row0 = rows[0] || [], row2 = rows[2] || [];
+  const isArchive = String(row0[0]||'') === '學生' &&
+                    String(row0[2]||'').includes('節點平均答對率') &&
+                    String(row0[4]||'').includes('題目平均答對率');
+  if (!isArchive) return null;
+
+  // Row 3+ = 學生資料
+  // Col 0 = 學生（格式："5年 2班 1號 陳霆蔚"）
+  // Col 2 = 節點平均答對率（第一次）
+  // Col 4 = 題目平均答對率（第一次）
+  // 每個節點從 Col 6 開始，每8欄一個節點
+  // Col+0 = 節點名稱（Row0），Col+7 = 該節點答對率（Row2='答對率'）
+  const dataRows = rows.slice(3).filter(r => r[0] && String(r[0]).trim());
+  if (!dataRows.length) return null;
+
+  // 找所有節點名稱欄與其答對率欄（Col+7）
+  const nodeMap = {}; // nodeName → 答對率欄 index
+  for (let i = 6; i < row0.length - 7; i++) {
+    if (row0[i] && row2[i + 7] === '答對率') {
+      const raw = String(row0[i]).trim();
+      // 取節點簡稱（斜線後的部分，如「字音[五]/本音1」→「字音[五]/本音1」）
+      nodeMap[raw] = i + 7;
+    }
+  }
+
+  // 解析學生資料
+  const students = [], scores = [];
+  dataRows.forEach(r => {
+    const raw = String(r[0] || '').trim();
+    // 格式："5年 2班 1號 陳霆蔚" → 座號="1號", 姓名="陳霆蔚"
+    const m = raw.match(/(\d+)班\s+(\d+)號\s+(.+)$/);
+    const num = m ? m[2] + '號' : raw;
+    const name = m ? m[3].trim() : '';
+
+    // 題目平均答對率（Col 4）
+    const avgScore = parseFloat(r[4]);
+    if (!isNaN(avgScore) && avgScore > 0) scores.push(avgScore);
+
+    // 找此學生的弱點節點（答對率 < 60 的節點）
+    const weakNodes = [];
+    Object.entries(nodeMap).forEach(([nodeName, col]) => {
+      const rate = parseFloat(r[col]);
+      if (!isNaN(rate) && rate < 60) {
+        // 取節點簡稱（避免過長的代碼前綴）
+        const shortName = nodeName.replace(/^[\w-]+-[IVX]+-\d+-\d+-\d+\s+/, '').trim();
+        if (isValidNode(shortName)) weakNodes.push(shortName);
+      }
+    });
+
+    students.push({ number: num, name, weakNodes, rawAvgScore: isNaN(avgScore) ? null : avgScore });
+  });
+
+  const classAvg = scores.length > 0 ? Math.round(scores.reduce((a,b)=>a+b,0) / scores.length) : null;
+  const allNodes = new Set(students.flatMap(s => s.weakNodes));
+
+  return { students, allNodes, classAvg, nodeCount: Object.keys(nodeMap).length, formatDetected: '考古題匯出格式（113年學力檢測）' };
+}
+
 function previewExcel() {
   const file = document.getElementById('excel-file').files[0], area = document.getElementById('excel-preview-area');
   if (!file) { area.style.display = 'none'; return; }
@@ -1097,43 +1158,70 @@ function previewExcel() {
   reader.onload = e => {
     try {
       const wb = XLSX.read(e.target.result, { type: 'binary' }), ws = wb.Sheets[wb.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-      const rows = data.filter(r => r.some(c => String(c).trim()));
+      const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+      const rows = data.filter(r => r.some(c => c !== '' && c !== null && c !== undefined));
       let students = [], allNodes = new Set(), formatDetected = '';
-      const headerRowIdx = rows.findIndex(r => String(r[0]).includes('座號') || String(r[0]).includes('任務資訊'));
-      const dataRows = headerRowIdx >= 0 ? rows.slice(headerRowIdx + 1) : rows;
-      const hasJsonCol = dataRows.some(r => { try { const p = JSON.parse(r[3]); return Array.isArray(p); } catch(e) { return false; } });
-      if (hasJsonCol) {
-        formatDetected = 'GAS任務分頁格式';
-        dataRows.forEach(r => {
-          if (!r[0] || !String(r[0]).trim()) return;
-          let num = String(r[0]).trim(), name = String(r[1] || '').trim();
-          let wn = []; try { wn = JSON.parse(r[3] || '[]'); } catch(e) {}
-          wn = wn.filter(isValidNode); students.push({ number: num, name, weakNodes: wn }); wn.forEach(n => allNodes.add(n));
-        });
+      // ⭐ v13.12.0：優先嘗試考古題格式
+      app.excelAvgScore = null;
+      const archiveResult = _parseArchiveExcel(rows);
+      if (archiveResult) {
+        students = archiveResult.students;
+        allNodes = archiveResult.allNodes;
+        formatDetected = archiveResult.formatDetected;
+        app.excelAvgScore = archiveResult.classAvg;
       } else {
-        let hasValid = false;
-        dataRows.slice(0, 5).forEach(r => { for (let j = 2; j < r.length; j++) { if (isValidNode(r[j])) { hasValid = true; break; } } });
-        if (hasValid) {
-          formatDetected = '標準格式';
+        // 原有邏輯：GAS任務分頁格式 / 標準格式
+        const headerRowIdx = rows.findIndex(r => String(r[0]).includes('座號') || String(r[0]).includes('任務資訊'));
+        const dataRows = headerRowIdx >= 0 ? rows.slice(headerRowIdx + 1) : rows;
+        const hasJsonCol = dataRows.some(r => { try { const p = JSON.parse(r[3]); return Array.isArray(p); } catch(e) { return false; } });
+        if (hasJsonCol) {
+          formatDetected = 'GAS任務分頁格式';
           dataRows.forEach(r => {
             if (!r[0] || !String(r[0]).trim()) return;
-            const num = String(r[0]).trim(), name = String(r[1] || '').trim(), wn = [];
-            for (let j = 2; j < r.length; j++) { const v = String(r[j] || '').trim(); if (isValidNode(v)) wn.push(v); }
-            students.push({ number: num, name, weakNodes: wn }); wn.forEach(n => allNodes.add(n));
+            let num = String(r[0]).trim(), name = String(r[1] || '').trim();
+            let wn = []; try { wn = JSON.parse(r[3] || '[]'); } catch(e) {}
+            wn = wn.filter(isValidNode); students.push({ number: num, name, weakNodes: wn }); wn.forEach(n => allNodes.add(n));
           });
+        } else {
+          let hasValid = false;
+          dataRows.slice(0, 5).forEach(r => { for (let j = 2; j < r.length; j++) { if (isValidNode(r[j])) { hasValid = true; break; } } });
+          if (hasValid) {
+            formatDetected = '標準格式';
+            dataRows.forEach(r => {
+              if (!r[0] || !String(r[0]).trim()) return;
+              const num = String(r[0]).trim(), name = String(r[1] || '').trim(), wn = [];
+              for (let j = 2; j < r.length; j++) { const v = String(r[j] || '').trim(); if (isValidNode(v)) wn.push(v); }
+              students.push({ number: num, name, weakNodes: wn }); wn.forEach(n => allNodes.add(n));
+            });
+          }
         }
       }
+
       app.excelStudents = students; app.excelNodes = [...allNodes];
       document.getElementById('preview-count').textContent = `共 ${students.length} 位學生`;
-      const thead = `<thead><tr><th>座號</th><th>姓名</th><th>節點數</th></tr></thead>`;
-      const tbody = '<tbody>' + students.map(s => `<tr><td>${esc(s.number)}</td><td>${esc(s.name)||'—'}</td><td><span class="badge bg-primary">${s.weakNodes.length}</span></td></tr>`).join('') + '</tbody>';
+      const thead = `<thead><tr><th>座號</th><th>姓名</th><th>弱點節點數</th>${app.excelAvgScore !== null ? '<th>題目答對率</th>' : ''}</tr></thead>`;
+      const tbody = '<tbody>' + students.map(s => `<tr><td>${esc(s.number)}</td><td>${esc(s.name)||'—'}</td><td><span class="badge bg-primary">${s.weakNodes.length}</span></td>${app.excelAvgScore !== null ? `<td class="small text-muted">${s.rawAvgScore !== null && s.rawAvgScore !== undefined ? s.rawAvgScore+'分' : '—'}</td>` : ''}</tr>`).join('') + '</tbody>';
       document.getElementById('preview-table').innerHTML = thead + tbody;
       const nd = document.getElementById('preview-nodes');
-      nd.innerHTML = allNodes.size > 0 ? [...allNodes].map(n => `<span class="weak-node-badge">${esc(n)}</span>`).join('') : '<span class="text-muted">（無有效節點）</span>';
-      document.getElementById('preview-warning').innerHTML = allNodes.size > 0
-        ? `<div class="alert alert-success py-1 px-2 small mt-2">✅ 格式：${formatDetected}，共 ${allNodes.size} 個有效節點。</div>`
-        : `<div class="warn-banner mt-2">⚠️ 無有效弱點節點，將出「通用基礎練習」。</div>`;
+      nd.innerHTML = allNodes.size > 0 ? [...allNodes].map(n => `<span class="weak-node-badge">${esc(n)}</span>`).join('') : '<span class="text-muted">（無有效弱點節點）</span>';
+
+      // ⭐ 顯示平均分與建議門檻
+      let warnHtml = '';
+      if (allNodes.size > 0) {
+        warnHtml += `<div class="alert alert-success py-1 px-2 small mt-2">✅ 格式：${formatDetected}，共 ${allNodes.size} 個弱點節點。</div>`;
+      } else {
+        warnHtml += `<div class="warn-banner mt-2">⚠️ 無有效弱點節點，將出「通用基礎練習」。</div>`;
+      }
+      if (app.excelAvgScore !== null) {
+        const suggested = Math.min(app.excelAvgScore + 10, 100);
+        warnHtml += `<div class="alert alert-info py-2 px-3 small mt-2">
+          <i class="fa-solid fa-chart-bar me-1"></i>
+          <b>全班題目平均答對率：${app.excelAvgScore} 分</b>（取自「題目平均答對率第一次」欄）<br>
+          建議門檻（平均+10分）：<b class="text-primary">${suggested} 分</b>
+          ——上傳後將自動帶入題庫管理的「建議門檻」供老師參考。
+        </div>`;
+      }
+      document.getElementById('preview-warning').innerHTML = warnHtml;
       area.style.display = '';
     } catch(err) { Swal.fire({ icon: 'error', title: 'Excel 解析失敗', text: err.message }); }
   };
@@ -1170,7 +1258,7 @@ async function uploadAndGenerate() {
   const pArea = document.getElementById('gen-progress-area'), pBar = document.getElementById('gen-progress-bar'), pMsg = document.getElementById('gen-progress-msg'), pEl = document.getElementById('gen-elapsed');
   pArea.style.display = ''; pBar.style.width = '0%'; pMsg.textContent = WAITING_MSGS[0]; startProgress(pMsg, pEl);
   try {
-    await _gasPost('uploadTaskData', {taskName, grade, subject, studentData: app.excelStudents, uniqueNodes: app.excelNodes});
+    await _gasPost('uploadTaskData', {taskName, grade, subject, studentData: app.excelStudents, uniqueNodes: app.excelNodes, avgScore: app.excelAvgScore});
     pBar.style.width = '8%'; pMsg.textContent = '✅ 學生名冊已儲存，開始 AI 出題…';
     const effectiveNodes = app.excelNodes.length > 0 ? app.excelNodes : ['通用基礎練習'];
     if (app.upEngine === 'claude') {
@@ -1226,9 +1314,10 @@ async function loadBankStatus() {
     populateAdminTaskDropdowns();
     if (!tasks.length) { area.innerHTML = '<p class="text-muted">目前沒有任務。</p>'; return; }
 
-    // ⭐ v13.11.0：序列查詢（for...of）避免 GAS 並行限制
+    // ⭐ v13.12.0：序列查詢（for...of）避免 GAS 並行限制
     const questionCounts = {};
     const passRates = {};
+    const avgScores = {}; // 全班平均分（來自考古題 Excel 上傳時計算）
     for (const task of tasks) {
       try {
         const res = await _gasPost('getTaskQuestions', { taskName: task.taskName });
@@ -1237,7 +1326,8 @@ async function loadBankStatus() {
       try {
         const pr = await _gasPost('getTaskPassRate', { taskName: task.taskName });
         passRates[task.taskName] = pr.passRate || 0;
-      } catch(e) { passRates[task.taskName] = 0; }
+        avgScores[task.taskName] = pr.avgScore !== undefined ? pr.avgScore : null;
+      } catch(e) { passRates[task.taskName] = 0; avgScores[task.taskName] = null; }
     }
 
     let html = '<div class="row g-3">';
@@ -1245,6 +1335,7 @@ async function loadBankStatus() {
       const valid = _toArray(task.weakNodes).filter(isValidNode);
       const qCount = questionCounts[task.taskName] ?? -1;
       const passRate = passRates[task.taskName] || 0;
+      const avgScore = avgScores[task.taskName]; // 可能為 null
       const color = qCount > 0 ? 'success' : (valid.length > 0 ? 'warning' : 'secondary');
       const safeKey = task.taskName.replace(/[^a-zA-Z0-9]/g, '_');
       const qBadge = qCount < 0
@@ -1255,6 +1346,29 @@ async function loadBankStatus() {
       const passRateBadge = passRate > 0
         ? `<span class="badge bg-info text-dark"><i class="fa-solid fa-trophy me-1"></i>門檻：${passRate}分</span>`
         : `<span class="badge bg-light text-muted border">無門檻</span>`;
+      // ⭐ v13.12.0：智慧門檻 UI
+      const suggestedDefault = avgScore !== null ? Math.min(avgScore + 10, 100) : (passRate || '');
+      const avgScoreHtml = avgScore !== null
+        ? `<div class="d-flex align-items-center gap-2 mb-2 flex-wrap">
+             <span class="badge bg-secondary"><i class="fa-solid fa-chart-bar me-1"></i>全班平均：${avgScore} 分</span>
+             <span class="text-muted" style="font-size:.72rem;">（來自考古題 Excel）</span>
+           </div>
+           <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+             <span class="small text-muted fw-bold">緩衝：平均</span>
+             <select class="form-select form-select-sm" id="buffer-${safeKey}" style="max-width:110px;" onchange="updateSuggestedRate('${safeKey}', ${avgScore})">
+               <option value="-10">－10 分</option>
+               <option value="-5">－5 分</option>
+               <option value="0">±0 分</option>
+               <option value="5">＋5 分</option>
+               <option value="10" selected>＋10 分</option>
+               <option value="15">＋15 分</option>
+               <option value="20">＋20 分</option>
+             </select>
+             <span class="small text-muted">=</span>
+             <span class="badge bg-primary" id="suggested-badge-${safeKey}">建議 ${suggestedDefault} 分</span>
+             <button class="btn btn-outline-primary btn-sm py-0 px-2" onclick="applysuggested('${safeKey}', ${avgScore})">套用</button>
+           </div>`
+        : `<div class="text-muted mb-2" style="font-size:.72rem;"><i class="fa-solid fa-circle-info me-1"></i>上傳考古題 Excel 後可自動計算建議門檻</div>`;
       html += `<div class="col-12 col-md-6 col-lg-4" id="task-card-${safeKey}">
         <div class="card p-3 h-100 border-${color} border-2">
           <div class="d-flex justify-content-between align-items-start mb-1">
@@ -1264,11 +1378,12 @@ async function loadBankStatus() {
           <p class="text-muted small mb-1">${esc(task.grade)} / ${esc(task.subject)} / ${task.studentCount} 位學生</p>
           <p class="text-muted small mb-1">建立：${esc(task.createdAt)}</p>
           <div class="d-flex gap-2 flex-wrap small mb-2">${qBadge}<span class="badge bg-${valid.length>0?'primary':'secondary'}">${valid.length} 個節點</span>${passRateBadge}</div>
-          <!-- ⭐ v13.11.0：開放作答名單設定區 -->
+          <!-- ⭐ v13.12.0：智慧建議門檻 -->
           <div class="pass-rate-card mb-2">
             <div class="pass-title"><i class="fa-solid fa-trophy me-1"></i>開放作答名單（答對率門檻）</div>
+            ${avgScoreHtml}
             <div class="d-flex gap-2 align-items-center flex-wrap">
-              <div class="input-group input-group-sm" style="max-width:160px;">
+              <div class="input-group input-group-sm" style="max-width:165px;">
                 <span class="input-group-text">門檻</span>
                 <input type="number" class="form-control pass-rate-input" id="passrate-${safeKey}" min="0" max="100" value="${passRate}" placeholder="0=全班皆測">
                 <span class="input-group-text">分</span>
@@ -1276,7 +1391,7 @@ async function loadBankStatus() {
               <button class="btn btn-sm btn-success" data-task="${esc(task.taskName)}" data-key="${safeKey}" onclick="savePassRate(this.dataset.task, this.dataset.key)"><i class="fa-solid fa-save me-1"></i>設定</button>
               <button class="btn btn-sm btn-outline-info" data-task="${esc(task.taskName)}" onclick="viewPassedList(this.dataset.task)"><i class="fa-solid fa-list-check me-1"></i>查看名單</button>
             </div>
-            <div class="text-muted mt-1" style="font-size:.75rem;">設為 0 = 全班皆須作答 ｜ 1~100 = 低於此分才須作答</div>
+            <div class="text-muted mt-1" style="font-size:.72rem;">設為 0 = 全班皆須作答 ｜ 1~100 = 低於此分才須作答</div>
           </div>
           <div class="mb-2">
             <label class="form-label small fw-bold text-muted mb-1">重新出題模式</label>
@@ -1296,6 +1411,28 @@ async function loadBankStatus() {
     });
     html += '</div>'; area.innerHTML = html;
   } catch(e) { area.innerHTML = `<p class="text-danger">載入失敗：${e.message}</p>`; }
+}
+
+// ⭐ v13.12.0：緩衝下拉選單變更時更新「建議 XX 分」badge
+function updateSuggestedRate(safeKey, avgScore) {
+  const sel = document.getElementById('buffer-' + safeKey);
+  const badge = document.getElementById('suggested-badge-' + safeKey);
+  if (!sel || !badge) return;
+  const buffer = parseInt(sel.value) || 0;
+  const suggested = Math.max(0, Math.min(100, avgScore + buffer));
+  badge.textContent = `建議 ${suggested} 分`;
+}
+
+// ⭐ v13.12.0：套用建議門檻到輸入框
+function applysuggested(safeKey, avgScore) {
+  const sel = document.getElementById('buffer-' + safeKey);
+  const input = document.getElementById('passrate-' + safeKey);
+  if (!sel || !input) return;
+  const buffer = parseInt(sel.value) || 0;
+  const suggested = Math.max(0, Math.min(100, avgScore + buffer));
+  input.value = suggested;
+  input.classList.add('border-primary');
+  setTimeout(() => input.classList.remove('border-primary'), 1200);
 }
 
 // ⭐ v13.11.0：儲存答對率門檻
