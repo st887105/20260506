@@ -1142,7 +1142,7 @@ function _parseArchiveExcel(rows) {
       }
     });
 
-    students.push({ number: num, name, weakNodes, rawAvgScore: isNaN(avgScore) ? null : avgScore });
+    students.push({ number: num, name, weakNodes, archiveScore: isNaN(avgScore) ? null : avgScore });
   });
 
   const classAvg = scores.length > 0 ? Math.round(scores.reduce((a,b)=>a+b,0) / scores.length) : null;
@@ -1200,7 +1200,7 @@ function previewExcel() {
       app.excelStudents = students; app.excelNodes = [...allNodes];
       document.getElementById('preview-count').textContent = `共 ${students.length} 位學生`;
       const thead = `<thead><tr><th>座號</th><th>姓名</th><th>弱點節點數</th>${app.excelAvgScore !== null ? '<th>題目答對率</th>' : ''}</tr></thead>`;
-      const tbody = '<tbody>' + students.map(s => `<tr><td>${esc(s.number)}</td><td>${esc(s.name)||'—'}</td><td><span class="badge bg-primary">${s.weakNodes.length}</span></td>${app.excelAvgScore !== null ? `<td class="small text-muted">${s.rawAvgScore !== null && s.rawAvgScore !== undefined ? s.rawAvgScore+'分' : '—'}</td>` : ''}</tr>`).join('') + '</tbody>';
+      const tbody = '<tbody>' + students.map(s => `<tr><td>${esc(s.number)}</td><td>${esc(s.name)||'—'}</td><td><span class="badge bg-primary">${s.weakNodes.length}</span></td>${app.excelAvgScore !== null ? `<td class="small text-muted">${s.archiveScore !== null && s.archiveScore !== undefined ? s.archiveScore+'分' : '—'}</td>` : ''}</tr>`).join('') + '</tbody>';
       document.getElementById('preview-table').innerHTML = thead + tbody;
       const nd = document.getElementById('preview-nodes');
       nd.innerHTML = allNodes.size > 0 ? [...allNodes].map(n => `<span class="weak-node-badge">${esc(n)}</span>`).join('') : '<span class="text-muted">（無有效弱點節點）</span>';
@@ -1466,11 +1466,18 @@ async function viewPassedList(taskName) {
     if (result.threshold === 0) return Swal.fire({ icon: 'info', title: '此任務未設定門檻', text: '全班皆須作答。請先設定答對率門檻。' });
     const { threshold, students } = result;
     if (!students || !students.length) return Swal.fire({ icon: 'info', title: '目前無達標學生', html: `門檻：${threshold} 分<br>尚無學生歷史最高分達到此門檻。` });
-    const tbody = students.map((s, i) => `<tr><td>${i+1}</td><td>${esc(s.number)}</td><td class="fw-bold text-success">${esc(anonymizeName(s.name))||'—'}</td><td><span class="badge bg-success">${s.bestScore} 分</span></td></tr>`).join('');
+    const tbody = students.map((s, i) => {
+      const srcBadge = s.source === 'archive'
+        ? `<span class="badge bg-warning text-dark" style="font-size:.65rem;">考古題</span>`
+        : s.source === 'system'
+          ? `<span class="badge bg-info text-dark" style="font-size:.65rem;">系統作答</span>`
+          : `<span class="badge bg-secondary" style="font-size:.65rem;">兩者</span>`;
+      return `<tr><td>${i+1}</td><td>${esc(s.number)}</td><td class="fw-bold text-success">${esc(anonymizeName(s.name))||'—'}</td><td><span class="badge bg-success">${s.bestScore} 分</span></td><td>${srcBadge}</td></tr>`;
+    }).join('');
     Swal.fire({
       title: `「${taskName}」達標名單`,
-      html: `<div class="text-start"><div class="alert alert-success py-1 px-2 small mb-2">門檻：<b>${threshold} 分</b>｜共 <b>${students.length}</b> 位學生已達標</div><div style="max-height:420px;overflow-y:auto;"><table class="table table-sm table-bordered table-hover mb-0"><thead class="table-success sticky-top"><tr><th>#</th><th>座號</th><th>匿名姓名</th><th>最高分</th></tr></thead><tbody>${tbody}</tbody></table></div></div>`,
-      confirmButtonText: '關閉', width: '500px'
+      html: `<div class="text-start"><div class="alert alert-success py-1 px-2 small mb-2">門檻：<b>${threshold} 分</b>｜共 <b>${students.length}</b> 位學生已達標</div><div style="max-height:420px;overflow-y:auto;"><table class="table table-sm table-bordered table-hover mb-0"><thead class="table-success sticky-top"><tr><th>#</th><th>座號</th><th>匿名姓名</th><th>最高分</th><th>來源</th></tr></thead><tbody>${tbody}</tbody></table></div></div>`,
+      confirmButtonText: '關閉', width: '560px'
     });
   } catch(e) { Swal.close(); Swal.fire({ icon: 'error', title: '查詢失敗', text: e.message }); }
 }
