@@ -53,6 +53,9 @@
     .option-btn.wrong    .option-prefix{background:#d32f2f;color:#fff;}
     .fill-input{border:2px solid #e0e0e0;border-radius:12px;padding:13px 16px;width:100%;font-size:1rem;transition:border-color .2s;}
     .fill-input:focus{outline:none;border-color:var(--primary);}
+    .essay-input{border:2px solid #e0e0e0;border-radius:12px;padding:13px 16px;width:100%;font-size:1rem;line-height:1.8;min-height:120px;resize:vertical;transition:border-color .2s;font-family:inherit;}
+    .essay-input:focus{outline:none;border-color:var(--primary);}
+    .essay-submitted{background:#e8f5e9;border:2px solid #388e3c;border-radius:12px;padding:12px 16px;font-size:.95rem;color:#2e7d32;line-height:1.8;white-space:pre-wrap;word-break:break-word;}
     .quiz-progress{height:8px;border-radius:4px;}
     .badge-A{background:#d32f2f!important;} .badge-B{background:#f57c00!important;}
     .badge-C{background:#388e3c!important;} .badge-D{background:#1565c0!important;}
@@ -1874,8 +1877,25 @@ function renderQuestion(){
   document.getElementById('quiz-level-badge').innerHTML=lv?`<span class="badge badge-${lv}">Level ${lv}</span>`:'';
   document.getElementById('quiz-hint').style.display='none';document.getElementById('next-btn').disabled=true;
   const optContainer=document.getElementById('quiz-options');
-  if(q.type==='fill'){optContainer.innerHTML=`<input type="text" class="fill-input" id="fill-answer" placeholder="請輸入答案" oninput="onFillInput(this)">`;document.getElementById('fill-answer')?.focus();}
-  else{optContainer.innerHTML=(q.options||[]).map((opt,i)=>`<button class="option-btn" onclick="selectOption(this,'${OPT_LABELS[i]||String.fromCharCode(65+i)}')"><span class="option-prefix">${OPT_LABELS[i]||String.fromCharCode(65+i)}</span>${esc(opt)}</button>`).join('');}
+  const hasOptions=(q.options&&q.options.length>0);
+  if(q.type==='fill'){
+    // 填空題：單行輸入
+    optContainer.innerHTML=`<input type="text" class="fill-input" id="fill-answer" placeholder="請輸入答案" oninput="onFillInput(this)">`;
+    document.getElementById('fill-answer')?.focus();
+  } else if(hasOptions){
+    // 選擇題：有 options 就顯示選項按鈕（不論 type 值）
+    optContainer.innerHTML=(q.options||[]).map((opt,i)=>`<button class="option-btn" onclick="selectOption(this,'${OPT_LABELS[i]||String.fromCharCode(65+i)}')"><span class="option-prefix">${OPT_LABELS[i]||String.fromCharCode(65+i)}</span>${esc(opt)}</button>`).join('');
+  } else {
+    // ⭐ 問答題：多行 textarea，輸入任何文字即開放下一題，背景 AI 評分
+    optContainer.innerHTML=`
+      <div class="mb-2 small fw-bold text-muted"><i class="fa-solid fa-pen-to-square me-1 text-primary"></i>請在下方輸入你的答案：</div>
+      <textarea class="essay-input" id="essay-answer" placeholder="請輸入你的作答…" oninput="onEssayInput(this)"></textarea>
+      <div class="d-flex justify-content-between align-items-center mt-1">
+        <span class="small text-muted">字數：<span id="essay-char-count">0</span> 字</span>
+        <span class="small text-info"><i class="fa-solid fa-robot me-1"></i>送出後 AI 自動評分，不影響作答</span>
+      </div>`;
+    document.getElementById('essay-answer')?.focus();
+  }
   const _isChinese=(app.currentTask?.subject==='國語');
   const {passage:_passage,stem:_stem}=_parseQuestionText(q.text||'',_isChinese);
   const _passageEl=document.getElementById('quiz-reading-passage'),_questionTextEl=document.getElementById('quiz-question-text');
@@ -1884,29 +1904,114 @@ function renderQuestion(){
   if(typeof renderMathInElement!=='undefined'){try{renderMathInElement(document.getElementById('question-card'),{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});}catch(e){}}
 }
 function onFillInput(input){document.getElementById('next-btn').disabled=!input.value.trim();}
+function onEssayInput(ta){
+  const cnt=document.getElementById('essay-char-count');
+  if(cnt)cnt.textContent=ta.value.length;
+  document.getElementById('next-btn').disabled=!ta.value.trim();
+}
 function selectOption(btn,label){if(btn.disabled)return;document.querySelectorAll('.option-btn').forEach(b=>{b.classList.remove('selected');});btn.classList.add('selected');document.getElementById('next-btn').disabled=false;}
 function showHint(){const q=app.quizQuestions[app.qIndex];const hint=q.hint?q.hint.replace(/^\[Level [ABCD]\]\s*/,''):'此題無提示';const hintEl=document.getElementById('quiz-hint');hintEl.textContent='💡 '+hint;hintEl.style.display='';}
 function nextQuestion(){
-  const q=app.quizQuestions[app.qIndex];let selected='',correct=false;
-  if(q.type==='fill'){selected=(document.getElementById('fill-answer')?.value||'').trim();correct=selected===String(q.answer||'').trim();}
-  else{const selectedBtn=document.querySelector('.option-btn.selected');if(!selectedBtn)return;selected=selectedBtn.querySelector('.option-prefix').textContent.trim();correct=selected===String(q.answer||'').trim();document.querySelectorAll('.option-btn').forEach(b=>{b.disabled=true;const lbl=b.querySelector('.option-prefix').textContent.trim();if(lbl===String(q.answer||'').trim())b.classList.add('correct');else if(b.classList.contains('selected'))b.classList.add('wrong');});}
-  app.answers.push({node:q.node,level:q.level||'',text:q.text,selected,answer:q.answer,correct,hint:q.hint||''});
+  const q=app.quizQuestions[app.qIndex];
+  let selected='',correct=false,isEssay=false;
+  const hasOptions=(q.options&&q.options.length>0);
+  if(q.type==='fill'){
+    // 填空題
+    selected=(document.getElementById('fill-answer')?.value||'').trim();
+    correct=selected===String(q.answer||'').trim();
+  } else if(hasOptions){
+    // 選擇題
+    const selectedBtn=document.querySelector('.option-btn.selected');
+    if(!selectedBtn)return;
+    selected=selectedBtn.querySelector('.option-prefix').textContent.trim();
+    correct=selected===String(q.answer||'').trim();
+    document.querySelectorAll('.option-btn').forEach(b=>{
+      b.disabled=true;
+      const lbl=b.querySelector('.option-prefix').textContent.trim();
+      if(lbl===String(q.answer||'').trim())b.classList.add('correct');
+      else if(b.classList.contains('selected'))b.classList.add('wrong');
+    });
+  } else {
+    // ⭐ 問答題：記錄作答，背景送 AI 評分，不阻塞
+    isEssay=true;
+    selected=(document.getElementById('essay-answer')?.value||'').trim();
+    correct=true; // 問答題只要有作答就算完成，不扣分
+    // 背景呼叫 GAS gradeEssay，不 await，不影響測驗進行
+    const answerIdx=app.answers.length; // 記錄此題在 answers 中的 index
+    _gasPost('gradeEssay',{
+      questionText: q.text||'',
+      studentAnswer: selected,
+      referenceAnswer: q.answer||'',
+      hint: q.hint||'',
+      grade: app.currentTask?.grade||'',
+      subject: app.currentTask?.subject||''
+    }).then(result=>{
+      // 評分完成後回填到 answers 對應的題目
+      if(app.answers[answerIdx]){
+        app.answers[answerIdx].essayScore=result.score;     // 0~10
+        app.answers[answerIdx].essayComment=result.comment; // 評語
+        // 若結果頁已經開啟，即時更新那一題的顯示
+        const el=document.getElementById('essay-grade-'+answerIdx);
+        if(el)el.innerHTML=_renderEssayGrade(result.score,result.comment);
+      }
+    }).catch(e=>{
+      // 評分失敗靜默處理，不影響學生
+      if(app.answers[answerIdx]){
+        app.answers[answerIdx].essayScore=null;
+        app.answers[answerIdx].essayComment='（AI 評分失敗）';
+      }
+    });
+  }
+  app.answers.push({
+    node:q.node, level:q.level||'', text:q.text,
+    selected, answer:q.answer, correct, hint:q.hint||'',
+    isEssay, essayScore:undefined, essayComment:undefined
+  });
   document.getElementById('next-btn').disabled=true;
-  setTimeout(()=>{app.qIndex++;if(app.qIndex>=app.quizQuestions.length)finishQuiz();else renderQuestion();},correct?600:1200);
+  setTimeout(()=>{app.qIndex++;if(app.qIndex>=app.quizQuestions.length)finishQuiz();else renderQuestion();},isEssay?400:correct?600:1200);
+}
+// 輔助函式：渲染問答題的 AI 評分結果
+function _renderEssayGrade(score,comment){
+  if(score===null||score===undefined)return`<span class="badge bg-secondary">AI 評分中…</span>`;
+  const color=score>=8?'success':score>=5?'warning':'danger';
+  return`<span class="badge bg-${color} me-1">${score}/10 分</span><span class="small text-muted">${esc(comment||'')}</span>`;
 }
 async function finishQuiz(){
   if(app.timerInterval){clearInterval(app.timerInterval);app.timerInterval=null;}
-  const elapsed=Math.round((Date.now()-app.startTime)/1000),correct=app.answers.filter(a=>a.correct).length,total=app.answers.length,score=total>0?Math.round((correct/total)*100):0;
+  const elapsed=Math.round((Date.now()-app.startTime)/1000);
+  // 計分：問答題(isEssay)視為答對，不計入選擇/填空的對錯統計
+  const gradedAnswers=app.answers.filter(a=>!a.isEssay);
+  const correct=gradedAnswers.filter(a=>a.correct).length;
+  const total=gradedAnswers.length;
+  const score=total>0?Math.round((correct/total)*100):0;
   showView('result');
   document.getElementById('result-name').textContent=formatStudentLabel(app.currentStudent);
   document.getElementById('result-score').textContent=score+' 分';
-  document.getElementById('result-detail').textContent=`答對 ${correct} / ${total} 題｜耗時 ${Math.floor(elapsed/60)} 分 ${elapsed%60} 秒`;
-  const weakMap={};app.answers.filter(a=>!a.correct).forEach(a=>{if(a.node)weakMap[a.node]=(weakMap[a.node]||0)+1;});
+  const essayCount=app.answers.filter(a=>a.isEssay).length;
+  const detailExtra=essayCount>0?`｜問答題 ${essayCount} 題（AI 評分中）`:'';
+  document.getElementById('result-detail').textContent=`答對 ${correct} / ${total} 題｜耗時 ${Math.floor(elapsed/60)} 分 ${elapsed%60} 秒${detailExtra}`;
+  const weakMap={};app.answers.filter(a=>!a.correct&&!a.isEssay).forEach(a=>{if(a.node)weakMap[a.node]=(weakMap[a.node]||0)+1;});
   const weakNodes=Object.entries(weakMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
   const wnEl=document.getElementById('result-weak-nodes');
   wnEl.innerHTML=weakNodes.length?'<p class="small fw-bold text-muted mb-1">建議加強節點：</p>'+weakNodes.map(([n])=>`<span class="weak-node-badge">${esc(n)}</span>`).join(''):'';
   const reviewEl=document.getElementById('result-review');
-  reviewEl.innerHTML=app.answers.map((a,i)=>`<div class="d-flex gap-2 p-2 mb-1 rounded ${a.correct?'bg-light':'bg-danger bg-opacity-10'}"><span>${a.correct?'✅':'❌'}</span><div class="small flex-grow-1"><div class="fw-bold">第${i+1}題【${esc(a.node||'—')}】</div><div class="text-muted">${esc(a.text||'')}</div><div>作答：<b>${esc(a.selected)}</b>　正解：<b class="text-success">${esc(a.answer)}</b></div>${!a.correct&&a.hint?`<div class="text-secondary">💡 ${esc(a.hint.replace(/^\[Level [ABCD]\]\s*/,''))}</div>`:''}</div></div>`).join('');
+  reviewEl.innerHTML=app.answers.map((a,i)=>{
+    if(a.isEssay){
+      // 問答題：顯示作答內容 + AI 評分（可能尚未回來）
+      const gradeHtml=_renderEssayGrade(a.essayScore,a.essayComment);
+      return`<div class="d-flex gap-2 p-2 mb-1 rounded bg-light border-start border-primary border-3">
+        <span>📝</span>
+        <div class="small flex-grow-1">
+          <div class="fw-bold">第${i+1}題【${esc(a.node||'—')}】<span class="badge bg-primary ms-1" style="font-size:.65rem;">問答題</span></div>
+          <div class="text-muted mb-1">${esc(a.text||'')}</div>
+          <div class="mb-1">作答：<b>${esc(a.selected)}</b></div>
+          <div id="essay-grade-${i}">${gradeHtml}</div>
+        </div>
+      </div>`;
+    }
+    // 選擇題 / 填空題（原有樣式不變）
+    return`<div class="d-flex gap-2 p-2 mb-1 rounded ${a.correct?'bg-light':'bg-danger bg-opacity-10'}"><span>${a.correct?'✅':'❌'}</span><div class="small flex-grow-1"><div class="fw-bold">第${i+1}題【${esc(a.node||'—')}】</div><div class="text-muted">${esc(a.text||'')}</div><div>作答：<b>${esc(a.selected)}</b>　正解：<b class="text-success">${esc(a.answer)}</b></div>${!a.correct&&a.hint?`<div class="text-secondary">💡 ${esc(a.hint.replace(/^\[Level [ABCD]\]\s*/,''))}</div>`:''}</div></div>`;
+  }).join('');
   try{await _gasPost('submitQuizResult',{payload:{taskName:app.currentTask?.taskName||'',number:app.currentStudent?.number||'',name:app.currentStudent?.name||'',score,elapsed,details:app.answers}});}catch(e){console.warn('成績上傳失敗：',e.message);}
 }
 
