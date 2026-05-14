@@ -1060,7 +1060,11 @@ async function studentLogin() {
     Swal.fire({ title: '題目載入中…', text: '請稍候', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
     let questions = await _gasPost('generateQuiz', { weakNode, taskName });
     Swal.close();
-    if (!questions || questions.length === 0) return Swal.fire({ icon: 'warning', title: '題庫尚未建立', html: '老師尚未完成此任務的出題。' });
+    if (!questions || questions.length === 0) {
+      await Swal.fire({ icon: 'warning', title: '題庫尚未建立', html: '老師尚未完成此任務的出題。' });
+      showView('login'); // ⭐ 確保返回登入頁，不留空白
+      return;
+    }
     const taskSubject = app.currentTask?.subject || '';
     if (taskSubject) {
       const filtered = questions.filter(q => !q.subject || q.subject === taskSubject || q.subject === '');
