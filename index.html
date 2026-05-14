@@ -1892,27 +1892,38 @@ function renderQuestion(){
   const prevBtn=document.getElementById('prev-btn');
   if(prevBtn)prevBtn.style.display=app.qIndex>0?'':'none';
 
-  // ⭐ 短文繼承邏輯：
-  // 1. 本題有短文 → 更新 currentPassage（同節點才更新）
-  // 2. 本題無短文 → 若同節點則繼承顯示；不同節點則清空
+  // ⭐ 短文繼承邏輯（v13.13.0 修正）：
+  // 本題有短文 → 更新記憶，顯示新短文
+  // 本題無短文 → 沿用 currentPassage（不論節點，讓老師/AI 自行控制題組範圍）
+  // 換節點且無短文 → 清空（依據：新節點開始，且本題也沒有短文）
   const _isChinese=(app.currentTask?.subject==='國語');
   const {passage:_passage,stem:_stem}=_parseQuestionText(q.text||'',_isChinese);
   const _passageEl=document.getElementById('quiz-reading-passage'),_questionTextEl=document.getElementById('quiz-question-text');
   if(_passage){
-    // 本題自帶短文，更新記憶
+    // 本題自帶短文 → 更新記憶並顯示
     app.currentPassage=_passage;
     app.currentPassageNode=q.node||'';
     _passageEl.style.display='';
     _passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(_passage)+'</div></div>';
     _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(_stem)+'</span>';
-  } else if(app.currentPassage && (q.node||'')===(app.currentPassageNode||'')){
-    // 本題無短文，但同節點 → 繼承顯示短文，題幹顯示整題文字
-    _passageEl.style.display='';
-    _passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(app.currentPassage)+'</div></div>';
-    _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
+  } else if(app.currentPassage){
+    // 本題無短文，但有記憶中的短文 → 判斷是否換節點
+    const sameNode=(q.node||'').trim()===(app.currentPassageNode||'').trim();
+    if(sameNode){
+      // 同節點：繼續顯示短文
+      _passageEl.style.display='';
+      _passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(app.currentPassage)+'</div></div>';
+      _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
+    } else {
+      // 換節點：清空短文記憶
+      app.currentPassage='';
+      app.currentPassageNode=q.node||'';
+      _passageEl.style.display='none';
+      _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
+    }
   } else {
-    // 換節點或無短文 → 清空短文記憶
-    if((q.node||'')!==(app.currentPassageNode||'')){app.currentPassage='';app.currentPassageNode=q.node||'';}
+    // 無記憶短文
+    app.currentPassageNode=q.node||'';
     _passageEl.style.display='none';
     _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
   }
