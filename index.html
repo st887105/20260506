@@ -514,6 +514,7 @@
         </div>
         <div class="d-flex gap-2 mt-3 justify-content-between">
           <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" onclick="prevQuestion()" id="prev-btn" style="display:none;"><i class="fa-solid fa-arrow-left me-1"></i>上一題</button>
             <button class="btn btn-outline-info btn-sm" onclick="showHint()"><i class="fa-regular fa-lightbulb me-1"></i>提示</button>
             <button class="btn btn-outline-secondary btn-sm" onclick="toggleScratch()"><i class="fa-solid fa-pen-to-square me-1"></i>計算紙</button>
           </div>
@@ -1866,7 +1867,18 @@ function printWorksheet(mode) {
 // ==========================================
 // 🎮 測驗流程
 // ==========================================
-function startQuiz(questions){app.quizQuestions=questions;app.qIndex=0;app.answers=[];app.startTime=Date.now();showView('quiz');document.getElementById('quiz-student-label').textContent=formatStudentLabel(app.currentStudent)+'　'+(app.currentTask?.taskName||'');startTimer();renderQuestion();}
+function startQuiz(questions){
+  app.quizQuestions=questions;
+  app.qIndex=0;
+  app.answers=[];
+  app.startTime=Date.now();
+  app.currentPassage=''; // ⭐ 短文繼承：記錄當前顯示的閱讀短文
+  app.currentPassageNode=''; // 記錄短文所屬節點
+  showView('quiz');
+  document.getElementById('quiz-student-label').textContent=formatStudentLabel(app.currentStudent)+'　'+(app.currentTask?.taskName||'');
+  startTimer();
+  renderQuestion();
+}
 function startTimer(){if(app.timerInterval)clearInterval(app.timerInterval);app.timerInterval=setInterval(()=>{const sec=Math.round((Date.now()-app.startTime)/1000),m=Math.floor(sec/60),s=sec%60;document.getElementById('quiz-timer').textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;},1000);}
 function renderQuestion(){
   const q=app.quizQuestions[app.qIndex],total=app.quizQuestions.length;
@@ -1875,32 +1887,66 @@ function renderQuestion(){
   document.getElementById('quiz-node-label').textContent=q.node?`【${q.node}】`:'';
   const lv=q.level||(q.hint?.match(/Level ([ABCD])/)||[])[1]||'';
   document.getElementById('quiz-level-badge').innerHTML=lv?`<span class="badge badge-${lv}">Level ${lv}</span>`:'';
-  document.getElementById('quiz-hint').style.display='none';document.getElementById('next-btn').disabled=true;
-  const optContainer=document.getElementById('quiz-options');
-  const hasOptions=(q.options&&q.options.length>0);
-  if(q.type==='fill'){
-    // 填空題：單行輸入
-    optContainer.innerHTML=`<input type="text" class="fill-input" id="fill-answer" placeholder="請輸入答案" oninput="onFillInput(this)">`;
-    document.getElementById('fill-answer')?.focus();
-  } else if(hasOptions){
-    // 選擇題：有 options 就顯示選項按鈕（不論 type 值）
-    optContainer.innerHTML=(q.options||[]).map((opt,i)=>`<button class="option-btn" onclick="selectOption(this,'${OPT_LABELS[i]||String.fromCharCode(65+i)}')"><span class="option-prefix">${OPT_LABELS[i]||String.fromCharCode(65+i)}</span>${esc(opt)}</button>`).join('');
-  } else {
-    // ⭐ 問答題：多行 textarea，輸入任何文字即開放下一題，背景 AI 評分
-    optContainer.innerHTML=`
-      <div class="mb-2 small fw-bold text-muted"><i class="fa-solid fa-pen-to-square me-1 text-primary"></i>請在下方輸入你的答案：</div>
-      <textarea class="essay-input" id="essay-answer" placeholder="請輸入你的作答…" oninput="onEssayInput(this)"></textarea>
-      <div class="d-flex justify-content-between align-items-center mt-1">
-        <span class="small text-muted">字數：<span id="essay-char-count">0</span> 字</span>
-        <span class="small text-info"><i class="fa-solid fa-robot me-1"></i>送出後 AI 自動評分，不影響作答</span>
-      </div>`;
-    document.getElementById('essay-answer')?.focus();
-  }
+  document.getElementById('quiz-hint').style.display='none';
+  // ⭐ 上一題按鈕：第一題不顯示
+  const prevBtn=document.getElementById('prev-btn');
+  if(prevBtn)prevBtn.style.display=app.qIndex>0?'':'none';
+
+  // ⭐ 短文繼承邏輯：
+  // 1. 本題有短文 → 更新 currentPassage（同節點才更新）
+  // 2. 本題無短文 → 若同節點則繼承顯示；不同節點則清空
   const _isChinese=(app.currentTask?.subject==='國語');
   const {passage:_passage,stem:_stem}=_parseQuestionText(q.text||'',_isChinese);
   const _passageEl=document.getElementById('quiz-reading-passage'),_questionTextEl=document.getElementById('quiz-question-text');
-  if(_passage){_passageEl.style.display='';_passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(_passage)+'</div></div>';_questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(_stem)+'</span>';}
-  else{_passageEl.style.display='none';_questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';}
+  if(_passage){
+    // 本題自帶短文，更新記憶
+    app.currentPassage=_passage;
+    app.currentPassageNode=q.node||'';
+    _passageEl.style.display='';
+    _passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(_passage)+'</div></div>';
+    _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(_stem)+'</span>';
+  } else if(app.currentPassage && (q.node||'')===(app.currentPassageNode||'')){
+    // 本題無短文，但同節點 → 繼承顯示短文，題幹顯示整題文字
+    _passageEl.style.display='';
+    _passageEl.innerHTML='<div class="reading-passage"><span class="reading-passage-label">📖 閱讀短文</span><div class="reading-passage-text">'+esc(app.currentPassage)+'</div></div>';
+    _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
+  } else {
+    // 換節點或無短文 → 清空短文記憶
+    if((q.node||'')!==(app.currentPassageNode||'')){app.currentPassage='';app.currentPassageNode=q.node||'';}
+    _passageEl.style.display='none';
+    _questionTextEl.innerHTML='<span class="quiz-question-stem">'+esc(q.text||'')+'</span>';
+  }
+
+  // ⭐ 已有作答紀錄（從上一題返回）→ 還原選擇狀態
+  const prevAnswer=app.answers[app.qIndex];
+  const optContainer=document.getElementById('quiz-options');
+  const hasOptions=(q.options&&q.options.length>0);
+  if(q.type==='fill'){
+    const prevVal=prevAnswer?.selected||'';
+    optContainer.innerHTML=`<input type="text" class="fill-input" id="fill-answer" placeholder="請輸入答案" value="${esc(prevVal)}" oninput="onFillInput(this)">`;
+    document.getElementById('next-btn').disabled=!prevVal;
+    if(!prevVal)document.getElementById('fill-answer')?.focus();
+  } else if(hasOptions){
+    const prevSel=prevAnswer?.selected||'';
+    optContainer.innerHTML=(q.options||[]).map((opt,i)=>{
+      const lbl=OPT_LABELS[i]||String.fromCharCode(65+i);
+      const wasSelected=(prevSel&&prevSel===lbl);
+      return`<button class="option-btn${wasSelected?' selected':''}" onclick="selectOption(this,'${lbl}')"><span class="option-prefix">${lbl}</span>${esc(opt)}</button>`;
+    }).join('');
+    document.getElementById('next-btn').disabled=!prevSel;
+  } else {
+    const prevVal=prevAnswer?.selected||'';
+    optContainer.innerHTML=`
+      <div class="mb-2 small fw-bold text-muted"><i class="fa-solid fa-pen-to-square me-1 text-primary"></i>請在下方輸入你的答案：</div>
+      <textarea class="essay-input" id="essay-answer" placeholder="請輸入你的作答…" oninput="onEssayInput(this)">${esc(prevVal)}</textarea>
+      <div class="d-flex justify-content-between align-items-center mt-1">
+        <span class="small text-muted">字數：<span id="essay-char-count">${prevVal.length}</span> 字</span>
+        <span class="small text-info"><i class="fa-solid fa-robot me-1"></i>送出後 AI 自動評分，不影響作答</span>
+      </div>`;
+    document.getElementById('next-btn').disabled=!prevVal.trim();
+    if(!prevVal)document.getElementById('essay-answer')?.focus();
+  }
+
   if(typeof renderMathInElement!=='undefined'){try{renderMathInElement(document.getElementById('question-card'),{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});}catch(e){}}
 }
 function onFillInput(input){document.getElementById('next-btn').disabled=!input.value.trim();}
@@ -1916,11 +1962,9 @@ function nextQuestion(){
   let selected='',correct=false,isEssay=false;
   const hasOptions=(q.options&&q.options.length>0);
   if(q.type==='fill'){
-    // 填空題
     selected=(document.getElementById('fill-answer')?.value||'').trim();
     correct=selected===String(q.answer||'').trim();
   } else if(hasOptions){
-    // 選擇題
     const selectedBtn=document.querySelector('.option-btn.selected');
     if(!selectedBtn)return;
     selected=selectedBtn.querySelector('.option-prefix').textContent.trim();
@@ -1932,43 +1976,48 @@ function nextQuestion(){
       else if(b.classList.contains('selected'))b.classList.add('wrong');
     });
   } else {
-    // ⭐ 問答題：記錄作答，背景送 AI 評分，不阻塞
     isEssay=true;
     selected=(document.getElementById('essay-answer')?.value||'').trim();
-    correct=true; // 問答題只要有作答就算完成，不扣分
-    // 背景呼叫 GAS gradeEssay，不 await，不影響測驗進行
-    const answerIdx=app.answers.length; // 記錄此題在 answers 中的 index
-    _gasPost('gradeEssay',{
-      questionText: q.text||'',
-      studentAnswer: selected,
-      referenceAnswer: q.answer||'',
-      hint: q.hint||'',
-      grade: app.currentTask?.grade||'',
-      subject: app.currentTask?.subject||''
-    }).then(result=>{
-      // 評分完成後回填到 answers 對應的題目
-      if(app.answers[answerIdx]){
-        app.answers[answerIdx].essayScore=result.score;     // 0~10
-        app.answers[answerIdx].essayComment=result.comment; // 評語
-        // 若結果頁已經開啟，即時更新那一題的顯示
-        const el=document.getElementById('essay-grade-'+answerIdx);
-        if(el)el.innerHTML=_renderEssayGrade(result.score,result.comment);
-      }
-    }).catch(e=>{
-      // 評分失敗靜默處理，不影響學生
-      if(app.answers[answerIdx]){
-        app.answers[answerIdx].essayScore=null;
-        app.answers[answerIdx].essayComment='（AI 評分失敗）';
-      }
-    });
+    correct=true;
+    // ⭐ 只有首次作答時才送 AI 評分（上一題返回後再次下一題不重複送）
+    const alreadyGraded=app.answers[app.qIndex]?.essayScore!==undefined;
+    if(!alreadyGraded){
+      const answerIdx=app.qIndex;
+      _gasPost('gradeEssay',{
+        questionText:q.text||'', studentAnswer:selected,
+        referenceAnswer:q.answer||'', hint:q.hint||'',
+        grade:app.currentTask?.grade||'', subject:app.currentTask?.subject||''
+      }).then(result=>{
+        if(app.answers[answerIdx]){
+          app.answers[answerIdx].essayScore=result.score;
+          app.answers[answerIdx].essayComment=result.comment;
+          const el=document.getElementById('essay-grade-'+answerIdx);
+          if(el)el.innerHTML=_renderEssayGrade(result.score,result.comment);
+        }
+      }).catch(()=>{
+        if(app.answers[answerIdx]){
+          app.answers[answerIdx].essayScore=null;
+          app.answers[answerIdx].essayComment='（AI 評分失敗）';
+        }
+      });
+    }
   }
-  app.answers.push({
+  // ⭐ 覆蓋式寫入：上一題返回後修改答案，直接更新同一格
+  app.answers[app.qIndex]={
     node:q.node, level:q.level||'', text:q.text,
     selected, answer:q.answer, correct, hint:q.hint||'',
-    isEssay, essayScore:undefined, essayComment:undefined
-  });
+    isEssay,
+    essayScore: app.answers[app.qIndex]?.essayScore,
+    essayComment: app.answers[app.qIndex]?.essayComment
+  };
   document.getElementById('next-btn').disabled=true;
   setTimeout(()=>{app.qIndex++;if(app.qIndex>=app.quizQuestions.length)finishQuiz();else renderQuestion();},isEssay?400:correct?600:1200);
+}
+// ⭐ 上一題：不覆寫作答，只移動 index 並重新渲染
+function prevQuestion(){
+  if(app.qIndex<=0)return;
+  app.qIndex--;
+  renderQuestion();
 }
 // 輔助函式：渲染問答題的 AI 評分結果
 function _renderEssayGrade(score,comment){
